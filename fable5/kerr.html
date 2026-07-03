@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Kerr Black Hole</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#000}
+  canvas{width:100vw;height:100vh;display:block;cursor:grab;touch-action:none}
+  canvas:active{cursor:grabbing}
+  #ui{position:fixed;top:14px;left:14px;color:#cfd6e4;
+      font:13px/1.5 system-ui,-apple-system,sans-serif;
+      background:rgba(10,14,22,.55);border:1px solid rgba(255,255,255,.08);
+      border-radius:10px;padding:10px 14px;backdrop-filter:blur(6px);
+      user-select:none;max-width:340px}
+  #ui h1{font-size:15px;margin:0 0 4px;color:#fff;font-weight:600}
+  #ui .hint{opacity:.72}
+  #ui .phys{opacity:.55;font-size:11.5px;margin-top:5px}
+  #ui label{display:flex;align-items:center;gap:8px;margin-top:8px;color:#fff}
+  #ui input[type=range]{flex:1;accent-color:#7da7ff}
+  #ui #spinv{font:12px ui-monospace,Menlo,monospace;min-width:44px;text-align:right}
+  #readout{font:11.5px ui-monospace,Menlo,monospace;opacity:.7;margin-top:4px}
+  #fps{position:fixed;right:12px;bottom:10px;color:#9fb8a8;opacity:.85;
+       font:12px ui-monospace,Menlo,monospace;user-select:none}
+  #err{position:fixed;inset:20px;color:#f99;font:13px ui-monospace,monospace;
+       white-space:pre-wrap;background:rgba(40,0,0,.92);padding:16px;
+       border-radius:8px;overflow:auto;z-index:9}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <h1>Kerr Black Hole</h1>
+  <div class="hint">drag to orbit &middot; scroll / pinch to zoom &middot; double-click to reset</div>
+  <label>spin a/M
+    <input id="spin" type="range" min="0" max="0.998" step="0.002" value="0.90">
+    <span id="spinv">0.900</span>
+  </label>
+  <div id="readout"></div>
+  <div class="phys">Kerr&ndash;Schild Hamiltonian geodesics per pixel (M = 1) &middot;
+    prograde thin disk from the ISCO &middot; exact Doppler beaming + gravitational
+    redshift from the orbiting gas 4-velocity &middot; frame dragging drags the shadow
+    &amp; inner disk edge as you raise the spin</div>
+</div>
+<div id="fps"></div>
+<div id="err" hidden></div>
+<script>
+(function(){
+"use strict";
+
+const VERT = `#version 300 es
+in vec2 aPos;
+void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+const FRAG = `#version 300 es
+precision highp float;
+
+out vec4 fragColor;
+
+uniform vec2  uRes;
+uniform float uTime;
+uniform vec3  uCamPos;
+uniform mat3  uCam;      // columns: right, up, forward
+uniform float uTanFov;
+uniform float uA;        // spin a/M
+uniform float uRin;      // ISCO radius (BL r, prograde)
+uniform float uRh;       // outer horizon r+ = 1 + sqrt(1-a^2)
+
+// Units: G = c = M = 1.  Spin axis = +z, disk in the z = 0 plane.
+const float R_OUT = 15.0;
+const float R_ESC = 70.0;
+const int   MAXST = 360;
+
+// ---------- hash / noise ----------
+float hash12(vec2 p){
+  vec3 p3 = fract(vec3(p.xyx)*0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y)*p3.z);
+}
+float hash13(vec3 p3){
+  p3 = fract(p3*0.1031);
+  p3 += dot(p3, p3.zyx + 31.32);
+  return fract((p3.x + p3.y)*p3.z);
+}
+vec3 hash33(vec3 p3){
+  p3 = fract(p3*vec3(0.1031, 0.1030, 0.0973));
+  p3 += dot(p3, p3.yxz + 33.33);
+  return fract((p3.xxy + p3.yxx)*p3.zyx);
+}
+float vnoise(vec3 p){
+  vec3 i = floor(p), f = fract(p);
+  f = f*f*(3.0 - 2.0*f);
+  return mix(
+    mix(mix(hash13(i),                 hash13(i+vec3(1,0,0)), f.x),
+        mix(hash13(i+vec3(0,1,0)),     hash13(i+vec3(1,1,0)), f.x), f.y),
+    mix(mix(hash13(i+vec3(0,0,1)),     hash13(i+vec3(1,0,1)), f.x),
+        mix(hash13(i+vec3(0,1,1)),     hash13(i+vec3(1,1,1)), f.x), f.y),
+    f.z);
+}
+float fbm(vec3 p){
+  float a = 0.5, s = 0.0;
+  for(int i=0;i<4;i++){ s += a*vnoise(p); p = p*2.03 + 17.1; a *= 0.5; }
+  return s;
+}
+
+// ---------- blackbody color (Tanner Helland fit) ----------
+vec3 blackbody(float T){
+  float t = clamp(T, 1000.0, 40000.0)/100.0;
+  float r = t <= 66.0 ? 1.0
+          : clamp(1.29294 * pow(t - 60.0, -0.1332047), 0.0, 1.0);
+  float g = t <= 66.0 ? clamp(0.3900816*log(t) - 0.6318414, 0.0, 1.0)
+          : clamp(1.1298909 * pow(t - 60.0, -0.0755148), 0.0, 1.0);
+  float b = t >= 66.0 ? 1.0
+          : (t <= 19.0 ? 0.0 : clamp(0.5432068*log(t - 10.0) - 1.1962541, 0.0, 1.0));
+  return vec3(r, g, b);
+}
+
+// ---------- starfield ----------
+vec3 starLayer(vec3 d, float n, float size, float gain){
+  vec3 p  = d*n;
+  vec3 id = floor(p);
+  vec3 f  = fract(p) - 0.5;
+  vec3 h  = hash33(id);
+  float dist = length(f - (h - 0.5)*0.7);
+  float b    = hash13(id + 19.19);
+  float star = smoothstep(size, 0.0, dist);
+  star *= star*star;
+  vec3 tint = mix(vec3(1.0,0.75,0.55), vec3(0.65,0.75,1.0), hash13(id + 7.7));
+  return star * pow(b, 18.0) * gain * tint;
+}
+vec3 sky(vec3 d){
+  vec3 col = vec3(0.0);
+  vec3 bn = normalize(vec3(0.35, 0.60, 0.72));   // galactic band, tilted vs. disk
+  float band = pow(max(1.0 - abs(dot(d, bn)), 0.0), 5.0);
+  float n1 = fbm(d*3.2 + 4.7);
+  float n2 = fbm(d*7.5 + 9.2);
+  col += band*(vec3(0.30,0.36,0.55)*n1*n1*0.55 + vec3(0.55,0.33,0.25)*n2*n2*0.28);
+  col += vec3(0.010, 0.012, 0.018);
+  col += starLayer(d,  96.0, 0.10, 22.0);
+  col += starLayer(d,  41.0, 0.05, 34.0);
+  col += starLayer(d, 173.0, 0.12,  9.0);
+  return col;
+}
+
+// ---------- Kerr metric in Kerr-Schild form ----------
+// g_uv = eta_uv + f k_u k_v,   f = 2 r^3 / (r^4 + a^2 z^2),
+// k = (1, (r x + a y)/(r^2+a^2), (r y - a x)/(r^2+a^2), z/r),
+// with BL radius r given by  r^4 - (rho^2 - a^2) r^2 - a^2 z^2 = 0.
+void metricAt(vec3 x, out float r, out float f, out vec3 kv){
+  float a = uA, a2 = a*a;
+  float rho2 = dot(x, x);
+  float w  = rho2 - a2;
+  float sq = sqrt(w*w + 4.0*a2*x.z*x.z);
+  float r2 = max(0.5*(w + sq), 1e-8);
+  r = sqrt(r2);
+  float D = max(r2*r2 + a2*x.z*x.z, 1e-8);
+  f = 2.0*r2*r/D;
+  float S = r2 + a2;
+  kv = vec3((r*x.x + a*x.y)/S, (r*x.y - a*x.x)/S, x.z/r);
+}
+
+// Hamiltonian H = 1/2 [ -pt^2 + |p|^2 - f(-pt + k.p)^2 ]  (pt conserved).
+// dx/dl = dH/dp,  dp/dl = -dH/dx  with analytic gradients of r, f, k.
+void geo(vec3 x, vec3 p, float pt, out vec3 dx, out vec3 dp){
+  float a = uA, a2 = a*a;
+  float rho2 = dot(x, x);
+  float w  = rho2 - a2;
+  float z  = x.z;
+  float sq = max(sqrt(w*w + 4.0*a2*z*z), 1e-8);
+  float r2 = max(0.5*(w + sq), 1e-8);
+  float r  = sqrt(r2);
+  float D  = max(r2*r2 + a2*z*z, 1e-8);
+  float f  = 2.0*r2*r/D;
+  float S  = r2 + a2;
+  float Nx = r*x.x + a*x.y, Ny = r*x.y - a*x.x;
+  vec3 kv  = vec3(Nx/S, Ny/S, z/r);
+  float Q  = -pt + dot(kv, p);
+
+  dx = p - f*Q*kv;
+
+  vec3 gr = (r2*x + vec3(0.0, 0.0, a2*z))/(r*sq);          // grad r
+  float r6 = r2*r2*r2;
+  vec3 gf = ((6.0*r2*D - 8.0*r6)/(D*D))*gr                 // grad f
+          - vec3(0.0, 0.0, 4.0*a2*z*r2*r/(D*D));
+  float A = (x.x*p.x + x.y*p.y)/S
+          - 2.0*r*(Nx*p.x + Ny*p.y)/(S*S)
+          - z*p.z/r2;
+  vec3 pdk = A*gr + vec3((r*p.x - a*p.y)/S,                // p . dk/dx
+                         (a*p.x + r*p.y)/S,
+                          p.z/r);
+  dp = 0.5*gf*Q*Q + f*Q*pdk;
+}
+
+// ---------- accretion disk ----------
+// Prograde circular geodesic orbit:  Omega = 1/(r^{3/2} + a),
+// u^t = (r^{3/2}+a) / ( r^{3/4} sqrt(r^{3/2} - 3 r^{1/2} + 2a) ).
+// g = E_cam / E_em with E_em = u^t (E - Omega L),  E = -p_t,  L = p_phi.
+vec3 shadeDisk(vec3 hit, vec3 pHit, float E, float Ecam, out float alpha){
+  float a = uA;
+  float rb2 = max(hit.x*hit.x + hit.y*hit.y - a*a, 1e-6);
+  float rb  = sqrt(rb2);
+  alpha = 0.0;
+  if(rb < uRin*0.995 || rb > R_OUT) return vec3(0.0);
+
+  float sr  = sqrt(rb);
+  float r32 = rb*sr;
+  float Om  = 1.0/(r32 + a);
+  float ut  = (r32 + a)/(pow(rb, 0.75)*sqrt(max(r32 - 3.0*sr + 2.0*a, 1e-4)));
+  float L   = hit.x*pHit.y - hit.y*pHit.x;
+  float Eem = ut*(E - Om*L);
+  float g   = clamp(Ecam/max(Eem, 1e-4), 0.05, 8.0);
+
+  // temperature profile; zero point a little inside the ISCO so the inner
+  // rim still glows instead of going black
+  float ri   = uRin*0.80;
+  float rpk  = ri*49.0/36.0;
+  float prof = max((1.0 - sqrt(ri/rb))/(rb*rb*rb), 0.0);
+  float pk   = (1.0 - sqrt(ri/rpk))/(rpk*rpk*rpk);
+  float pn   = prof/pk;
+
+  float phi = atan(hit.y, hit.x);
+  float ph  = phi - Om*uTime*3.0;
+  float lr  = log(rb/uRin);
+  float streak = 0.62 + 0.38*(0.55*sin(2.0*ph - 7.0*lr)
+                            + 0.30*sin(5.0*ph + 1.3 - 13.0*lr)
+                            + 0.15*sin(11.0*ph + 4.1 - 23.0*lr));
+  vec2  q    = rb*vec2(cos(ph), sin(ph));
+  float turb = 0.75 + 0.5*(fbm(vec3(q*0.9, 1.7)) - 0.47);
+
+  float Tobs  = clamp(7000.0*pow(pn, 0.25)*g, 1000.0, 39000.0);
+  float inten = pn*streak*turb*g*g*g;
+  vec3  col   = blackbody(Tobs)*inten*1.9;
+
+  float edge = smoothstep(uRin*0.995, uRin*1.04, rb)
+             * (1.0 - smoothstep(R_OUT*0.72, R_OUT, rb));
+  alpha = edge*min(0.12 + 1.15*pn*(0.4 + 0.6*streak*turb), 0.95);
+  return col*edge;
+}
+
+vec3 render(vec3 ro, vec3 rdir){
+  float a = uA, a2 = a*a;
+
+  // Null initial momentum: spatial coordinate direction rdir, solve
+  // g(xdot,xdot)=0 for tdot, then p_u = g_uv xdot^v (future-directed, E>0).
+  float r0, f0; vec3 kv0;
+  metricAt(ro, r0, f0, kv0);
+  float kd   = dot(kv0, rdir);
+  float sq0  = sqrt(max(1.0 - f0*(1.0 - kd*kd), 0.0));
+  float tdot = (f0*kd + sq0)/max(1.0 - f0, 1e-3);
+  float wq   = f0*(tdot + kd);
+  float pt   = -tdot + wq;
+  vec3  p    = rdir + wq*kv0;
+  float E    = -pt;
+  float Ecam = E/sqrt(max(1.0 - f0, 1e-3));   // energy seen by static camera
+
+  vec3 pos = ro;
+  vec3 vel = rdir;
+  vec3 col = vec3(0.0);
+  float trans = 1.0;
+  bool esc = false;
+
+  for(int i=0;i<MAXST;i++){
+    float rho2 = dot(pos, pos);
+    float w   = rho2 - a2;
+    float sq  = sqrt(w*w + 4.0*a2*pos.z*pos.z);
+    float r2  = max(0.5*(w + sq), 1e-8);
+    float r   = sqrt(r2);
+    if(r < uRh + 0.02) break;                              // crossed the horizon
+    if(r > R_ESC && dot(pos, vel) > 0.0){ esc = true; break; }
+
+    // periodically re-enforce the null condition H = 0 (rescale |p|)
+    if((i & 3) == 0){
+      float D = max(r2*r2 + a2*pos.z*pos.z, 1e-8);
+      float f = 2.0*r2*r/D;
+      float S = r2 + a2;
+      vec3 kv = vec3((r*pos.x + a*pos.y)/S, (r*pos.y - a*pos.x)/S, pos.z/r);
+      float kp = dot(kv, p);
+      float P2 = dot(p, p);
+      float Aq = P2 - f*kp*kp;
+      float Bq = 2.0*f*pt*kp;
+      float Cq = -(1.0 + f)*pt*pt;
+      float dq = Bq*Bq - 4.0*Aq*Cq;
+      if(Aq > 1e-5 && dq > 0.0){
+        float s = (-Bq + sqrt(dq))/(2.0*Aq);
+        p *= clamp(s, 0.85, 1.18);
+      }
+    }
+
+    float dt = clamp(0.30*(r - uRh), 0.008, 0.22 + 0.05*r);
+    if(pos.z*vel.z < 0.0 && r < R_OUT + 4.0){
+      dt = min(dt, max(0.85*abs(pos.z)/max(abs(vel.z), 1e-3), 0.015));
+    }
+
+    vec3 dx1,dp1,dx2,dp2,dx3,dp3,dx4,dp4;                  // RK4
+    geo(pos,                p,                pt, dx1, dp1);
+    geo(pos + 0.5*dt*dx1,   p + 0.5*dt*dp1,   pt, dx2, dp2);
+    geo(pos + 0.5*dt*dx2,   p + 0.5*dt*dp2,   pt, dx3, dp3);
+    geo(pos + dt*dx3,       p + dt*dp3,       pt, dx4, dp4);
+    vec3 np = pos + (dt/6.0)*(dx1 + 2.0*dx2 + 2.0*dx3 + dx4);
+    vec3 pp = p   + (dt/6.0)*(dp1 + 2.0*dp2 + 2.0*dp3 + dp4);
+    vel = dx1;
+
+    if(pos.z*np.z < 0.0){
+      float fc = pos.z/(pos.z - np.z);
+      vec3 hit = mix(pos, np, fc);
+      float rb2 = hit.x*hit.x + hit.y*hit.y - a2;
+      if(rb2 > uRin*uRin*0.98 && rb2 < R_OUT*R_OUT){
+        float alpha;
+        vec3 em = shadeDisk(hit, mix(p, pp, fc), E, Ecam, alpha);
+        col   += trans*em;
+        trans *= 1.0 - alpha;
+        if(trans < 0.02) break;
+      }
+    }
+    pos = np; p = pp;
+  }
+  if(esc) col += trans*sky(normalize(vel));
+  return col;
+}
+
+vec3 aces(vec3 x){
+  return clamp((x*(2.51*x + 0.03))/(x*(2.43*x + 0.59) + 0.14), 0.0, 1.0);
+}
+
+void main(){
+  vec2 uv = (2.0*gl_FragCoord.xy - uRes)/uRes.y;
+  vec3 rd = normalize(uCam*vec3(uv*uTanFov, 1.0));
+  vec3 col = render(uCamPos, rd);
+  col = aces(col*1.1);
+  col = pow(col, vec3(1.0/2.2));
+  col += (hash12(gl_FragCoord.xy + fract(uTime)*61.7) - 0.5)/255.0;  // dither
+  fragColor = vec4(col, 1.0);
+}`;
+
+// ---------------- boilerplate ----------------
+const canvas = document.getElementById('c');
+const errBox = document.getElementById('err');
+const fpsEl  = document.getElementById('fps');
+const gl = canvas.getContext('webgl2',
+  {antialias:false, depth:false, stencil:false, alpha:false, powerPreference:'high-performance'});
+if(!gl){
+  errBox.hidden = false;
+  errBox.textContent = 'WebGL2 is required but not available in this browser.';
+  return;
+}
+canvas.addEventListener('webglcontextlost', e => {
+  e.preventDefault();
+  errBox.hidden = false;
+  errBox.textContent = 'WebGL context lost — reload the page.';
+});
+
+function compile(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    throw new Error(gl.getShaderInfoLog(s) || 'shader compile failed');
+  return s;
+}
+let prog;
+try{
+  const vs = compile(gl.VERTEX_SHADER, VERT);
+  const fs = compile(gl.FRAGMENT_SHADER, FRAG);
+  prog = gl.createProgram();
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+  if(!gl.getProgramParameter(prog, gl.LINK_STATUS))
+    throw new Error(gl.getProgramInfoLog(prog) || 'link failed');
+}catch(e){
+  errBox.hidden = false;
+  errBox.textContent = 'Shader error:\n' + e.message;
+  return;
+}
+gl.useProgram(prog);
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(prog, 'aPos');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+const U = {};
+for(const n of ['uRes','uTime','uCamPos','uCam','uTanFov','uA','uRin','uRh'])
+  U[n] = gl.getUniformLocation(prog, n);
+
+// ---------------- spin control ----------------
+function iscoOf(a){
+  const Z1 = 1 + Math.cbrt(1 - a*a)*(Math.cbrt(1 + a) + Math.cbrt(1 - a));
+  const Z2 = Math.sqrt(3*a*a + Z1*Z1);
+  return 3 + Z2 - Math.sqrt((3 - Z1)*(3 + Z1 + 2*Z2));   // prograde
+}
+const rhOf = a => 1 + Math.sqrt(Math.max(1 - a*a, 0));
+
+const spinEl = document.getElementById('spin');
+const spinV  = document.getElementById('spinv');
+const readEl = document.getElementById('readout');
+let A = 0.90, RIN = iscoOf(A), RH = rhOf(A);
+function updateSpin(){
+  A = parseFloat(spinEl.value);
+  RIN = iscoOf(A); RH = rhOf(A);
+  spinV.textContent = A.toFixed(3);
+  readEl.textContent = 'r+ = ' + RH.toFixed(3) + ' M   r_isco = ' + RIN.toFixed(3) + ' M';
+}
+spinEl.addEventListener('input', updateSpin);
+updateSpin();
+
+// ---------------- camera + input (z-up: spin axis vertical) ----------------
+const clamp = (x,a,b) => Math.min(Math.max(x,a),b);
+const cross3 = (a,b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+const norm3  = v => { const l = Math.hypot(v[0],v[1],v[2]) || 1; return [v[0]/l, v[1]/l, v[2]/l]; };
+
+const HOME = {yaw:0.0, pitch:0.14, dist:26.0};
+let yaw = HOME.yaw, pitch = HOME.pitch, dist = HOME.dist, distT = HOME.dist;
+let vyaw = 0, vpitch = 0, dragging = false, pinchD = 0;
+const pointers = new Map();
+
+canvas.addEventListener('pointerdown', e => {
+  canvas.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, [e.clientX, e.clientY]);
+  dragging = true; vyaw = 0; vpitch = 0;
+});
+canvas.addEventListener('pointermove', e => {
+  if(!pointers.has(e.pointerId)) return;
+  const prev = pointers.get(e.pointerId);
+  pointers.set(e.pointerId, [e.clientX, e.clientY]);
+  if(pointers.size === 1){
+    const dx = e.clientX - prev[0], dy = e.clientY - prev[1];
+    vyaw = -dx*0.005; vpitch = dy*0.005;
+    yaw += vyaw; pitch = clamp(pitch + vpitch, -1.35, 1.35);
+  }else if(pointers.size === 2){
+    const pts = [...pointers.values()];
+    const d = Math.hypot(pts[0][0]-pts[1][0], pts[0][1]-pts[1][1]);
+    if(pinchD > 0) distT = clamp(distT*pinchD/d, 5.0, 60.0);
+    pinchD = d;
+  }
+});
+const endPointer = e => {
+  pointers.delete(e.pointerId);
+  if(pointers.size < 2) pinchD = 0;
+  if(pointers.size === 0) dragging = false;
+};
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  distT = clamp(distT*Math.exp(e.deltaY*0.0011), 5.0, 60.0);
+}, {passive:false});
+canvas.addEventListener('dblclick', () => {
+  yaw = HOME.yaw; pitch = HOME.pitch; distT = HOME.dist; vyaw = vpitch = 0;
+});
+
+// ---------------- render loop with adaptive resolution ----------------
+const maxScale = Math.min(window.devicePixelRatio || 1, 1.6);
+let scale = maxScale;
+function resize(){
+  const w = Math.max(1, Math.round(canvas.clientWidth*scale));
+  const h = Math.max(1, Math.round(canvas.clientHeight*scale));
+  if(canvas.width !== w || canvas.height !== h){ canvas.width = w; canvas.height = h; }
+}
+window.addEventListener('resize', resize);
+
+let last = performance.now(), ema = 16, frames = 0, fpsT = 0;
+function frame(now){
+  const dtms = Math.min(now - last, 100); last = now;
+  ema = ema*0.95 + dtms*0.05;
+  frames++;
+  if(frames % 50 === 0){
+    if(ema > 21 && scale > 0.35)            scale = Math.max(0.35, scale*0.85);
+    else if(ema < 12.5 && scale < maxScale) scale = Math.min(maxScale, scale*1.1);
+  }
+  resize();
+
+  if(!dragging){
+    yaw += vyaw; pitch = clamp(pitch + vpitch, -1.35, 1.35);
+    vyaw *= 0.93; vpitch *= 0.93;
+  }
+  dist += (distT - dist)*0.12;
+
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const cy = Math.cos(yaw),   sy = Math.sin(yaw);
+  const pos = [dist*cp*cy, dist*cp*sy, dist*sp];   // z-up
+  const fw = norm3([-pos[0], -pos[1], -pos[2]]);
+  const rt = norm3(cross3(fw, [0,0,1]));
+  const up = cross3(rt, fw);
+
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.uniform2f(U.uRes, canvas.width, canvas.height);
+  gl.uniform1f(U.uTime, (now/1000) % 1800);
+  gl.uniform3f(U.uCamPos, pos[0], pos[1], pos[2]);
+  gl.uniformMatrix3fv(U.uCam, false,
+    [rt[0],rt[1],rt[2], up[0],up[1],up[2], fw[0],fw[1],fw[2]]);
+  gl.uniform1f(U.uTanFov, Math.tan(0.5*60*Math.PI/180));
+  gl.uniform1f(U.uA, A);
+  gl.uniform1f(U.uRin, RIN);
+  gl.uniform1f(U.uRh, RH);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  fpsT += dtms;
+  if(fpsT > 500){
+    fpsEl.textContent = (1000/ema).toFixed(0) + ' fps · ' + scale.toFixed(2) + 'x';
+    fpsT = 0;
+  }
+  requestAnimationFrame(frame);
+}
+resize();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

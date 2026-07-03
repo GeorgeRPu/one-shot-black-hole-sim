@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Kerr Black Hole</title>
+<style>
+  html,body{margin:0;padding:0;overflow:hidden;background:#000;height:100%;width:100%;}
+  canvas{display:block;width:100vw;height:100vh;touch-action:none;cursor:grab;}
+  canvas:active{cursor:grabbing;}
+  #ui{
+    position:fixed;top:10px;left:10px;color:#cfe3ff;font:12px/1.5 -apple-system,Helvetica,Arial,sans-serif;
+    background:rgba(10,14,24,0.5);padding:10px 14px;border-radius:8px;
+    user-select:none;letter-spacing:0.2px;min-width:220px;
+  }
+  #ui b{color:#fff;}
+  #ui .hint{opacity:0.85;margin-bottom:8px;display:block;}
+  #ui label{display:flex;align-items:center;gap:8px;}
+  #ui input[type=range]{flex:1;accent-color:#7fb2ff;}
+  #spinVal{width:3.6em;display:inline-block;text-align:right;color:#fff;font-variant-numeric:tabular-nums;}
+</style>
+</head>
+<body>
+<canvas id="glcanvas"></canvas>
+<div id="ui">
+  <b>Kerr (Spinning) Black Hole</b>
+  <span class="hint">drag to orbit &middot; scroll to zoom</span>
+  <label>spin a <input type="range" id="spin" min="0" max="0.998" step="0.001" value="0.85"> <span id="spinVal">0.85</span></label>
+</div>
+<script>
+(function(){
+"use strict";
+
+const canvas = document.getElementById("glcanvas");
+const gl = canvas.getContext("webgl2", {antialias:false, alpha:false, powerPreference:"high-performance"});
+if(!gl){ document.body.innerHTML = "<div style='color:#fff;font-family:sans-serif;padding:40px'>WebGL2 is required.</div>"; }
+
+const VERT_SRC = `#version 300 es
+void main(){
+  vec2 verts[3] = vec2[3](vec2(-1.0,-1.0), vec2(3.0,-1.0), vec2(-1.0,3.0));
+  gl_Position = vec4(verts[gl_VertexID], 0.0, 1.0);
+}`;
+
+const FRAG_SRC = `#version 300 es
+precision highp float;
+
+uniform vec2  iResolution;
+uniform vec3  uCamPos;
+uniform vec3  uCamRight;
+uniform vec3  uCamUp;
+uniform vec3  uCamFwd;
+uniform vec3  uRhat;
+uniform vec3  uThHat;
+uniform vec3  uPhHat;
+uniform float uTanHalfFov;
+uniform float uTime;
+uniform float uSpinA;
+uniform float uR0;
+uniform float uTh0;
+uniform float uDiskInner;
+uniform float uDiskOuter;
+
+out vec4 fragColor;
+
+// ---------- hashing / noise ----------
+float hash21(vec2 p){
+  p = fract(p*vec2(123.34,456.21));
+  p += dot(p, p+45.32);
+  return fract(p.x*p.y);
+}
+float hash13(vec3 p){
+  p = fract(p*0.1031);
+  p += dot(p, p.yzx+33.33);
+  return fract((p.x+p.y)*p.z);
+}
+float noise2(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  f = f*f*(3.0-2.0*f);
+  float a = hash21(i);
+  float b = hash21(i+vec2(1.0,0.0));
+  float c = hash21(i+vec2(0.0,1.0));
+  float d = hash21(i+vec2(1.0,1.0));
+  return mix(mix(a,b,f.x), mix(c,d,f.x), f.y);
+}
+float fbm(vec2 p){
+  float v = 0.0, amp = 0.5;
+  for(int i=0;i<5;i++){
+    v += amp*noise2(p);
+    p *= 2.02;
+    amp *= 0.55;
+  }
+  return v;
+}
+
+vec3 starfield(vec3 dir){
+  vec3 col = vec3(0.006,0.007,0.012);
+  float band = pow(max(0.0, 1.0-abs(dir.y)*1.4), 3.0);
+  col += band*vec3(0.05,0.045,0.09)*(0.5+0.5*fbm(dir.xz*2.5+dir.y*3.0));
+
+  for(int layer=0; layer<3; layer++){
+    float scale = 220.0 + float(layer)*140.0;
+    vec3 gp = dir*scale;
+    vec3 cell = floor(gp);
+    float n = hash13(cell + float(layer)*17.0);
+    if(n > 0.9835){
+      float b = fract(n*57.0);
+      vec3 starColor = mix(vec3(1.0,0.85,0.65), vec3(0.75,0.85,1.0), fract(n*13.0));
+      float bright = smoothstep(0.9835,1.0,n)*b;
+      col += starColor*bright*(1.4-float(layer)*0.28);
+    }
+  }
+  return col;
+}
+
+// ---------- Kerr geodesics (G=c=M=1, Boyer-Lindquist) ----------
+void initConserved(float a, float r0, float th0, vec3 nLocal,
+                    out float E, out float L, out float Q, out float pr, out float pth){
+  float st = max(sin(th0), 1e-4), ct = cos(th0);
+  float Sigma = r0*r0 + a*a*ct*ct;
+  float Delta = max(r0*r0 - 2.0*r0 + a*a, 1e-4);
+  float Asum  = (r0*r0+a*a)*(r0*r0+a*a) - a*a*Delta*st*st;
+  float alpha = sqrt(max(Sigma*Delta/Asum, 1e-9));
+  float omega = 2.0*a*r0/Asum;
+
+  L   = nLocal.z * st * sqrt(Asum/Sigma);
+  E   = alpha + omega*L;
+  pth = nLocal.y * sqrt(Sigma);
+  Q   = pth*pth + ct*ct*(L*L/(st*st) - a*a*E*E);
+  pr  = nLocal.x * sqrt(Sigma/Delta);
+}
+
+void derivAll(float r, float th, float pr, float pth, float a, float E, float L, float Q,
+              out vec3 dPos, out vec2 dMom){
+  float ct = cos(th), st = sin(th);
+  if(abs(st) < 1e-4) st = 1e-4;
+  float st2 = st*st;
+  float Sigma = r*r + a*a*ct*ct;
+  float Delta = max(r*r - 2.0*r + a*a, 1e-4);
+  float P = E*(r*r+a*a) - a*L;
+
+  float dr   = Delta*pr/Sigma;
+  float dth  = pth/Sigma;
+  float dphi = (a*P/Delta - a*E + L/st2)/Sigma;
+  dPos = vec3(dr, dth, dphi);
+
+  float eps = max(0.0025*r, 0.002);
+  float rp = r+eps, rm = r-eps;
+  float Dp = max(rp*rp-2.0*rp+a*a, 1e-4);
+  float Dm = max(rm*rm-2.0*rm+a*a, 1e-4);
+  float Pp = E*(rp*rp+a*a) - a*L;
+  float Pm = E*(rm*rm+a*a) - a*L;
+  float diffLE = (L-a*E)*(L-a*E);
+  float Rp = Pp*Pp - Dp*(diffLE+Q);
+  float Rm = Pm*Pm - Dm*(diffLE+Q);
+  float fRp = Dp*pr*pr - Rp/Dp;
+  float fRm = Dm*pr*pr - Rm/Dm;
+  float dpr = -(fRp-fRm)/(4.0*eps*Sigma);
+
+  float epsT = 0.004;
+  float thp = clamp(th+epsT, 0.02, 3.12159);
+  float thm = clamp(th-epsT, 0.02, 3.12159);
+  float ctp = cos(thp), stp = max(abs(sin(thp)),1e-4);
+  float ctm = cos(thm), stm = max(abs(sin(thm)),1e-4);
+  float Tp = Q + ctp*ctp*(a*a*E*E - L*L/(stp*stp));
+  float Tm = Q + ctm*ctm*(a*a*E*E - L*L/(stm*stm));
+  float dpth = (Tp-Tm)/(4.0*epsT*Sigma);
+
+  dMom = vec2(dpr, dpth);
+}
+
+vec3 escapeDirection(float r, float th, float phi, float pr, float pth, float a, float E, float L){
+  float ct = cos(th), st = max(abs(sin(th)),1e-4);
+  float Sigma = r*r + a*a*ct*ct;
+  float Delta = max(r*r - 2.0*r + a*a, 1e-4);
+  float Asum  = (r*r+a*a)*(r*r+a*a) - a*a*Delta*st*st;
+  float alpha = sqrt(max(Sigma*Delta/Asum, 1e-9));
+  float omega = 2.0*a*r/Asum;
+  float pt = max((E - omega*L)/alpha, 1e-4);
+
+  float nr   = pr*sqrt(Delta/Sigma)/pt;
+  float nth  = pth/sqrt(Sigma)/pt;
+  float nphi = (1.0/st)*sqrt(Sigma/Asum)*L/pt;
+  vec3 n = normalize(vec3(nr,nth,nphi));
+
+  float rho = sqrt(r*r+a*a);
+  vec3 rHat  = vec3(r*st*cos(phi), rho*ct, r*st*sin(phi))/sqrt(Sigma);
+  vec3 thHat = vec3(rho*ct*cos(phi), -r*st, rho*ct*sin(phi))/sqrt(Sigma);
+  vec3 phHat = vec3(-sin(phi), 0.0, cos(phi));
+
+  return normalize(n.x*rHat + n.y*thHat + n.z*phHat);
+}
+
+vec3 diskColorKerr(float r, float phi, float rInner, float rOuter, float g, out float alpha){
+  float t = clamp((r-rInner)/(rOuter-rInner), 0.0, 1.0);
+  vec3 hot  = vec3(1.6,1.25,0.95);
+  vec3 cool = vec3(0.95,0.28,0.06);
+  vec3 base = mix(hot, cool, pow(t,0.65));
+
+  float rot = uTime*(1.1/pow(r*0.35+0.6,1.5));
+  float turb = fbm(vec2(phi*2.4+rot, r*0.55-uTime*0.05));
+  turb = 0.55 + 0.9*turb;
+
+  float edge = smoothstep(rInner, rInner*1.35, r);
+  float fall = pow(rInner/max(r,0.001), 1.6);
+  float intensity = edge*fall*2.6;
+
+  float g4 = pow(clamp(g,0.05,4.0), 4.0);
+  vec3 shifted;
+  if(g > 1.0){
+    shifted = mix(base, vec3(0.65,0.82,1.45), clamp((g-1.0)*0.65,0.0,0.65));
+  } else {
+    shifted = mix(base, vec3(1.15,0.22,0.04), clamp((1.0-g)*0.85,0.0,0.75));
+  }
+
+  vec3 col = shifted*intensity*turb*g4;
+  alpha = clamp(0.25 + 1.15*edge*fall, 0.12, 0.93);
+  return col;
+}
+
+vec3 traceKerr(float r0, float th0, float pr0, float pth0, float a, float E, float L, float Q){
+  float r = r0, th = th0, phi = 0.0, pr = pr0, pth = pth0;
+  vec3 accum = vec3(0.0);
+  float alphaAcc = 0.0;
+  float rHorizon = 1.0 + sqrt(max(1.0-a*a, 0.0));
+
+  const int MAX_STEPS = 300;
+  for(int i=0; i<MAX_STEPS; i++){
+    if(r > 60.0) break;
+    if(r < rHorizon+0.03){ alphaAcc = 1.0; break; }
+
+    float rPrev = r, thPrev = th, phiPrev = phi;
+    float dt = 0.085*clamp((r-rHorizon)*0.5, 0.03, 2.2);
+
+    vec3 k1p,k2p,k3p,k4p; vec2 k1m,k2m,k3m,k4m;
+    derivAll(r, th, pr, pth, a,E,L,Q, k1p,k1m);
+    derivAll(r+0.5*dt*k1p.x, th+0.5*dt*k1p.y, pr+0.5*dt*k1m.x, pth+0.5*dt*k1m.y, a,E,L,Q, k2p,k2m);
+    derivAll(r+0.5*dt*k2p.x, th+0.5*dt*k2p.y, pr+0.5*dt*k2m.x, pth+0.5*dt*k2m.y, a,E,L,Q, k3p,k3m);
+    derivAll(r+dt*k3p.x, th+dt*k3p.y, pr+dt*k3m.x, pth+dt*k3m.y, a,E,L,Q, k4p,k4m);
+
+    r   += (dt/6.0)*(k1p.x+2.0*k2p.x+2.0*k3p.x+k4p.x);
+    th  += (dt/6.0)*(k1p.y+2.0*k2p.y+2.0*k3p.y+k4p.y);
+    phi += (dt/6.0)*(k1p.z+2.0*k2p.z+2.0*k3p.z+k4p.z);
+    pr  += (dt/6.0)*(k1m.x+2.0*k2m.x+2.0*k3m.x+k4m.x);
+    pth += (dt/6.0)*(k1m.y+2.0*k2m.y+2.0*k3m.y+k4m.y);
+
+    if(th < 0.02){ th = 0.02; pth = abs(pth); }
+    if(th > 3.12159){ th = 3.12159; pth = -abs(pth); }
+
+    if(alphaAcc < 0.995 && sign(cos(thPrev)) != sign(cos(th))){
+      float denom = cos(thPrev)-cos(th);
+      float tcross = abs(denom) > 1e-8 ? cos(thPrev)/denom : 0.5;
+      tcross = clamp(tcross, 0.0, 1.0);
+      float rHit = mix(rPrev, r, tcross);
+      float phiHit = mix(phiPrev, phi, tcross);
+      if(rHit > uDiskInner && rHit < uDiskOuter){
+        float Omega = 1.0/(pow(rHit,1.5)+a);
+        float lambda = L/E;
+        float utInv = sqrt(clamp(1.0-3.0/rHit+2.0*a/pow(rHit,1.5), 0.02, 1.0));
+        float g = utInv/max(1.0-Omega*lambda, 0.05);
+        float a_;
+        vec3 c = diskColorKerr(rHit, phiHit, uDiskInner, uDiskOuter, g, a_);
+        accum += (1.0-alphaAcc)*a_*c;
+        alphaAcc += (1.0-alphaAcc)*a_;
+      }
+    }
+  }
+
+  if(alphaAcc < 0.995){
+    vec3 skyDir = escapeDirection(r, th, phi, pr, pth, a, E, L);
+    accum += (1.0-alphaAcc)*starfield(skyDir);
+  }
+  return accum;
+}
+
+void main(){
+  vec2 uv = (gl_FragCoord.xy - 0.5*iResolution) / iResolution.y;
+  vec3 rd = normalize(uCamFwd + (uv.x*uTanHalfFov)*uCamRight + (uv.y*uTanHalfFov)*uCamUp);
+
+  float nr = dot(rd, uRhat), nth = dot(rd, uThHat), nphi = dot(rd, uPhHat);
+  float nlen = max(length(vec3(nr,nth,nphi)), 1e-6);
+  vec3 nLocal = vec3(nr,nth,nphi)/nlen;
+
+  float E,L,Q,pr,pth;
+  initConserved(uSpinA, uR0, uTh0, nLocal, E,L,Q,pr,pth);
+
+  vec3 col = traceKerr(uR0, uTh0, pr, pth, uSpinA, E, L, Q);
+
+  col *= 1.35;
+  col = col/(1.0+col);
+  float lum = dot(col, vec3(0.299,0.587,0.114));
+  col = mix(vec3(lum), col, 1.35);
+  col = pow(max(col,0.0), vec3(0.4545));
+  fragColor = vec4(col, 1.0);
+}`;
+
+function compile(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)){
+    console.error(gl.getShaderInfoLog(s));
+    throw new Error("shader compile failed");
+  }
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT_SRC));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG_SRC));
+gl.linkProgram(prog);
+if(!gl.getProgramParameter(prog, gl.LINK_STATUS)){
+  console.error(gl.getProgramInfoLog(prog));
+}
+gl.useProgram(prog);
+
+const U = {};
+["iResolution","uCamPos","uCamRight","uCamUp","uCamFwd","uRhat","uThHat","uPhHat",
+ "uTanHalfFov","uTime","uSpinA","uR0","uTh0","uDiskInner","uDiskOuter"]
+  .forEach(n => U[n] = gl.getUniformLocation(prog, n));
+
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+
+// ---------- ISCO (prograde, Bardeen-Press-Teukolsky) ----------
+function iscoRadius(a){
+  const Z1 = 1 + Math.cbrt(1-a*a)*(Math.cbrt(1+a)+Math.cbrt(1-a));
+  const Z2 = Math.sqrt(3*a*a + Z1*Z1);
+  return 3 + Z2 - Math.sqrt((3-Z1)*(3+Z1+2*Z2));
+}
+
+// ---------- orbit camera + spin control ----------
+const spinInput = document.getElementById("spin");
+const spinVal = document.getElementById("spinVal");
+const state = {
+  theta: 1.35,
+  phi: 0.9,
+  radius: 24.0,
+  spin: parseFloat(spinInput.value),
+  dragging: false,
+  lastX: 0, lastY: 0
+};
+spinInput.addEventListener("input", ()=>{
+  state.spin = parseFloat(spinInput.value);
+  spinVal.textContent = state.spin.toFixed(3);
+});
+spinVal.textContent = state.spin.toFixed(2);
+
+const RMIN_BASE = 7.0, RMAX = 55.0;
+const THMIN = 0.12, THMAX = Math.PI-0.12;
+
+canvas.addEventListener("pointerdown", e=>{
+  state.dragging = true; state.lastX = e.clientX; state.lastY = e.clientY;
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener("pointermove", e=>{
+  if(!state.dragging) return;
+  const dx = e.clientX - state.lastX, dy = e.clientY - state.lastY;
+  state.lastX = e.clientX; state.lastY = e.clientY;
+  state.phi   -= dx*0.0055;
+  state.theta -= dy*0.0055;
+  state.theta = Math.min(THMAX, Math.max(THMIN, state.theta));
+});
+window.addEventListener("pointerup", ()=>{ state.dragging = false; });
+canvas.addEventListener("pointercancel", ()=>{ state.dragging = false; });
+canvas.addEventListener("wheel", e=>{
+  e.preventDefault();
+  state.radius *= Math.exp(e.deltaY*0.0011);
+  const rMin = Math.max(RMIN_BASE, iscoRadius(state.spin)+3.0);
+  state.radius = Math.min(RMAX, Math.max(rMin, state.radius));
+}, {passive:false});
+
+function resize(){
+  const dpr = Math.min(window.devicePixelRatio||1, 1.5);
+  const w = Math.max(1, Math.floor(window.innerWidth*dpr));
+  const h = Math.max(1, Math.floor(window.innerHeight*dpr));
+  if(canvas.width!==w || canvas.height!==h){
+    canvas.width = w; canvas.height = h;
+    gl.viewport(0,0,w,h);
+  }
+}
+window.addEventListener("resize", resize);
+resize();
+
+const t0 = performance.now();
+function frame(){
+  resize();
+
+  const a = state.spin;
+  const rMin = Math.max(RMIN_BASE, iscoRadius(a)+3.0);
+  if(state.radius < rMin) state.radius = rMin;
+
+  const r0 = state.radius, th0 = state.theta, ph0 = state.phi;
+  const rho0 = Math.sqrt(r0*r0 + a*a);
+  const st0 = Math.sin(th0), ct0 = Math.cos(th0);
+  const sqrtSigma0 = Math.sqrt(r0*r0 + a*a*ct0*ct0);
+
+  const camPos = [
+    rho0*st0*Math.cos(ph0),
+    r0*ct0,
+    rho0*st0*Math.sin(ph0)
+  ];
+  const rHat = [
+    r0*st0*Math.cos(ph0)/sqrtSigma0,
+    rho0*ct0/sqrtSigma0,
+    r0*st0*Math.sin(ph0)/sqrtSigma0
+  ];
+  const thHat = [
+    rho0*ct0*Math.cos(ph0)/sqrtSigma0,
+    -r0*st0/sqrtSigma0,
+    rho0*ct0*Math.sin(ph0)/sqrtSigma0
+  ];
+  const phHat = [-Math.sin(ph0), 0, Math.cos(ph0)];
+
+  const camLen = Math.hypot(camPos[0],camPos[1],camPos[2]);
+  const fwd = [-camPos[0]/camLen, -camPos[1]/camLen, -camPos[2]/camLen];
+  const worldUp = [0,1,0];
+  let rx = fwd[1]*worldUp[2]-fwd[2]*worldUp[1];
+  let ry = fwd[2]*worldUp[0]-fwd[0]*worldUp[2];
+  let rz = fwd[0]*worldUp[1]-fwd[1]*worldUp[0];
+  const rl = Math.hypot(rx,ry,rz) || 1.0;
+  rx/=rl; ry/=rl; rz/=rl;
+  const upx = ry*fwd[2]-rz*fwd[1];
+  const upy = rz*fwd[0]-rx*fwd[2];
+  const upz = rx*fwd[1]-ry*fwd[0];
+
+  gl.uniform2f(U.iResolution, canvas.width, canvas.height);
+  gl.uniform3f(U.uCamPos, camPos[0], camPos[1], camPos[2]);
+  gl.uniform3f(U.uCamRight, rx, ry, rz);
+  gl.uniform3f(U.uCamUp, upx, upy, upz);
+  gl.uniform3f(U.uCamFwd, fwd[0], fwd[1], fwd[2]);
+  gl.uniform3f(U.uRhat, rHat[0], rHat[1], rHat[2]);
+  gl.uniform3f(U.uThHat, thHat[0], thHat[1], thHat[2]);
+  gl.uniform3f(U.uPhHat, phHat[0], phHat[1], phHat[2]);
+  gl.uniform1f(U.uTanHalfFov, Math.tan(0.5*50.0*Math.PI/180.0));
+  gl.uniform1f(U.uTime, (performance.now()-t0)/1000.0);
+  gl.uniform1f(U.uSpinA, a);
+  gl.uniform1f(U.uR0, r0);
+  gl.uniform1f(U.uTh0, th0);
+  gl.uniform1f(U.uDiskInner, iscoRadius(a));
+  gl.uniform1f(U.uDiskOuter, 20.0);
+
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Black Hole Sim Arena — LLM Comparison</title>
+<style>
+  :root {
+    --bg: #05070d;
+    --panel: #0d121e;
+    --panel-2: #131a2a;
+    --border: rgba(255, 255, 255, 0.09);
+    --border-bright: rgba(120, 160, 255, 0.45);
+    --text: #dde4f0;
+    --text-dim: #8b95ab;
+    --accent: #7aa2ff;
+    --accent-soft: rgba(122, 162, 255, 0.14);
+    font-size: 15px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font: 400 1rem/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ---------- Header ---------- */
+  header {
+    flex: 0 0 auto;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 18px;
+    padding: 10px 18px;
+    background: linear-gradient(180deg, #0a0f1a, #070b13);
+    border-bottom: 1px solid var(--border);
+  }
+  .brand {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-right: auto;
+    min-width: 0;
+    max-width: 58ch;
+  }
+  .brand h1 {
+    font-size: 1.05rem;
+    font-weight: 650;
+    margin: 0;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+  }
+  .brand .sub {
+    font-size: 0.78rem;
+    line-height: 1.4;
+    color: var(--text-dim);
+  }
+  .brand .sub a { color: var(--text-dim); }
+
+  .prompt-term {
+    position: relative;
+    color: var(--text);
+    border-bottom: 1px dotted var(--text-dim);
+    cursor: help;
+    outline: none;
+  }
+  .prompt-term:focus-visible { border-bottom-color: var(--accent); }
+  .prompt-pop {
+    display: none;
+    position: absolute;
+    left: 0;
+    top: 100%;
+    z-index: 100;
+    padding-top: 8px; /* hover bridge between the word and the panel */
+    width: min(600px, 86vw);
+    cursor: auto;
+  }
+  .prompt-term:hover .prompt-pop,
+  .prompt-term:focus .prompt-pop { display: block; }
+  .prompt-pop-inner {
+    display: block;
+    max-height: 62vh;
+    overflow-y: auto;
+    background: var(--panel-2);
+    border: 1px solid var(--border-bright);
+    border-radius: 10px;
+    padding: 12px 15px;
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.65);
+    color: var(--text);
+    font: 400 0.74rem/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap;
+  }
+
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: nowrap;
+  }
+  @media (max-width: 640px) {
+    .controls { flex-wrap: wrap; }
+  }
+  @media (max-width: 900px) {
+    .brand .sub { display: none; }
+  }
+
+  .seg {
+    display: inline-flex;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 3px;
+    gap: 2px;
+  }
+  .seg button {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--text-dim);
+    font: 600 0.82rem/1 inherit;
+    padding: 7px 13px;
+    border-radius: 6px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.12s, color 0.12s;
+  }
+  .seg button:hover { color: var(--text); }
+  .seg button[aria-pressed="true"] {
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+
+  /* ---------- Stage ---------- */
+  main {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: grid;
+    gap: 8px;
+    padding: 8px;
+  }
+  main[data-layout="single"]  { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+  main[data-layout="duel"]    { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr; }
+  main[data-layout="grid"]    { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+  @media (max-width: 760px) {
+    main[data-layout="duel"], main[data-layout="grid"] {
+      grid-template-columns: 1fr;
+      grid-template-rows: none;
+      grid-auto-rows: minmax(300px, 1fr);
+      overflow-y: auto;
+    }
+  }
+
+  .pane {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .pane-bar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--border);
+  }
+  .pane-bar select {
+    appearance: none;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    font: 600 0.82rem/1.2 inherit;
+    padding: 5px 26px 5px 10px;
+    cursor: pointer;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M1 1l4 4 4-4' stroke='%238b95ab' stroke-width='1.6' fill='none' stroke-linecap='round'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 9px center;
+  }
+  .pane-bar select:hover { border-color: var(--border-bright); }
+  .pane-bar .spacer { flex: 1; }
+  .icon-btn {
+    appearance: none;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-dim);
+    border-radius: 7px;
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: color 0.12s, border-color 0.12s;
+  }
+  .icon-btn:hover { color: var(--text); border-color: var(--border-bright); }
+
+  .pane-body {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    background: #000;
+  }
+  .pane-body iframe {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
+    background: #000;
+  }
+
+  .placeholder {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    cursor: pointer;
+    background:
+      radial-gradient(ellipse 60% 45% at 50% 55%, rgba(122, 162, 255, 0.10), transparent 70%),
+      #01030a;
+    border: 0;
+    color: var(--text-dim);
+    font: inherit;
+    width: 100%;
+  }
+  .placeholder:hover { color: var(--text); }
+  .placeholder .orb {
+    width: 66px;
+    height: 66px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 50% 50%, #000 0 38%, transparent 39%),
+                conic-gradient(from 120deg, #ffb45e, #ff7a3c, #6b3bff, #ffb45e);
+    filter: blur(0.4px);
+    box-shadow: 0 0 34px rgba(255, 140, 70, 0.35);
+  }
+  .placeholder .cta {
+    font-size: 0.88rem;
+    font-weight: 600;
+  }
+  .placeholder .meta { font-size: 0.76rem; }
+
+  footer {
+    flex: 0 0 auto;
+    padding: 6px 18px 9px;
+    font-size: 0.74rem;
+    color: var(--text-dim);
+    border-top: 1px solid var(--border);
+    background: #070b13;
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+  }
+  footer b { color: var(--text); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <h1>Black Hole Sim Arena</h1>
+    <span class="sub">Different LLMs were each given the same
+      <span class="prompt-term" tabindex="0">prompt<span class="prompt-pop" role="tooltip"><span class="prompt-pop-inner" id="promptPop"></span></span></span>.
+      Compare the results.</span>
+  </div>
+
+  <div class="controls">
+    <div class="seg" id="simSeg" role="group" aria-label="Simulation type">
+      <button data-sim="schwarzschild" aria-pressed="true">Schwarzschild</button>
+      <button data-sim="kerr" aria-pressed="false">Kerr (spinning)</button>
+    </div>
+
+    <div class="seg" id="layoutSeg" role="group" aria-label="Layout">
+      <button data-layout="single" aria-pressed="false">Single</button>
+      <button data-layout="duel" aria-pressed="true">Side by side</button>
+      <button data-layout="grid" aria-pressed="false">All four</button>
+    </div>
+
+  </div>
+</header>
+
+<main id="stage" data-layout="duel"></main>
+
+<footer>
+  <span>Sims load on click to spare your GPU — each pane runs its own real-time ray tracer.</span>
+</footer>
+
+<script>
+"use strict";
+
+const MODELS = [
+  { id: "opus4.6", label: "Claude Opus 4.6" },
+  { id: "opus4.8", label: "Claude Opus 4.8" },
+  { id: "sonnet5", label: "Claude Sonnet 5" },
+  { id: "fable5",  label: "Claude Fable 5" },
+];
+const SIM_NAMES = { schwarzschild: "Schwarzschild", kerr: "Kerr" };
+
+// raw markdown, verbatim from prompts.md
+const PROMPTS = {
+  schwarzschild: `## Schwarzschild Black Hole Simulator
+
+Build a real-time, interactive 3D black hole simulator as a single
+self-contained HTML file (vanilla JavaScript + WebGL, no libraries, no
+build step, no external assets).
+
+Requirements:
+- Trace light rays so the starfield background is gravitationally lensed
+  and the glowing accretion disk wraps over and under the black hole's
+  shadow.
+- Click-drag to orbit the camera, scroll to zoom.
+- Keep it smooth (~60fps) in a browser; prioritize physical correctness.
+
+Return only the complete HTML file.`,
+  kerr: `## Kerr Black Hole Simulator
+
+Build a real-time, interactive 3D simulator of a SPINNING (Kerr) black
+hole as a single self-contained HTML file (vanilla JavaScript + WebGL, no
+libraries, no build step, no external assets).
+
+Requirements:
+- Trace light rays through curved spacetime so the starfield background is
+  gravitationally lensed and the glowing accretion disk wraps over and
+  under the black hole's shadow.
+- Model black-hole spin with frame-dragging, and expose a control to vary
+  the spin from 0 (non-rotating) up to near-maximal. The shadow should
+  become asymmetric and the inner disk edge should move as spin changes.
+- Include relativistic effects on the disk: Doppler beaming (one side
+  noticeably brighter) and gravitational redshift.
+- Click-drag to orbit the camera, scroll to zoom.
+- Keep it smooth (~60fps) in a browser; prioritize physical correctness.
+
+Return only the complete HTML file.`,
+};
+
+const PANE_COUNT = { single: 1, duel: 2, grid: 4 };
+
+const state = {
+  sim: "schwarzschild",
+  layout: "duel",
+  // model chosen per pane slot; defaults cover all four models
+  slots: MODELS.map(m => m.id),
+  // panes the user has activated (index -> bool); grid auto-activates
+  loaded: [false, false, false, false],
+};
+
+// restore from URL hash if present, e.g. #kerr/grid or #kerr/duel/opus4.8,fable5
+(function restore() {
+  const parts = location.hash.replace(/^#/, "").split("/").filter(Boolean);
+  if (SIM_NAMES[parts[0]]) state.sim = parts[0];
+  if (PANE_COUNT[parts[1]]) state.layout = parts[1];
+  if (parts[2]) {
+    const ids = parts[2].split(",").filter(id => MODELS.some(m => m.id === id));
+    ids.forEach((id, i) => { if (i < 4) state.slots[i] = id; });
+  }
+})();
+
+const stage = document.getElementById("stage");
+
+function srcFor(modelId) {
+  return `${modelId}/${state.sim}.html`;
+}
+
+function syncHash() {
+  const n = PANE_COUNT[state.layout];
+  location.replace(
+    `#${state.sim}/${state.layout}/${state.slots.slice(0, n).join(",")}`
+  );
+}
+
+function buildPane(i) {
+  const pane = document.createElement("section");
+  pane.className = "pane";
+
+  const bar = document.createElement("div");
+  bar.className = "pane-bar";
+
+  const select = document.createElement("select");
+  select.title = "Choose model";
+  for (const m of MODELS) {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = m.label;
+    if (m.id === state.slots[i]) opt.selected = true;
+    select.appendChild(opt);
+  }
+  select.addEventListener("change", () => {
+    state.slots[i] = select.value;
+    syncHash();
+    render(); // reload this pane with the new model
+  });
+
+  const reload = document.createElement("button");
+  reload.className = "icon-btn";
+  reload.title = "Restart simulation";
+  reload.textContent = "↻";
+  reload.addEventListener("click", () => {
+    const frame = pane.querySelector("iframe");
+    if (frame) frame.src = frame.src.split("?")[0] + "?r=" + Date.now();
+  });
+
+  const fs = document.createElement("button");
+  fs.className = "icon-btn";
+  fs.title = "Fullscreen this pane";
+  fs.textContent = "⛶";
+  fs.addEventListener("click", () => {
+    const body = pane.querySelector(".pane-body");
+    if (document.fullscreenElement) document.exitFullscreen();
+    else body.requestFullscreen?.();
+  });
+
+  const spacer = document.createElement("span");
+  spacer.className = "spacer";
+
+  bar.append(select, spacer, reload, fs);
+
+  const body = document.createElement("div");
+  body.className = "pane-body";
+
+  if (state.loaded[i]) {
+    const frame = document.createElement("iframe");
+    frame.src = srcFor(state.slots[i]);
+    frame.title = `${state.slots[i]} — ${SIM_NAMES[state.sim]}`;
+    frame.loading = "lazy";
+    body.appendChild(frame);
+  } else {
+    const ph = document.createElement("button");
+    ph.className = "placeholder";
+    ph.innerHTML = `
+      <div class="orb"></div>
+      <div class="cta">▶ Load simulation</div>
+      <div class="meta">real-time WebGL ray tracer</div>`;
+    ph.addEventListener("click", () => {
+      state.loaded[i] = true;
+      render();
+    });
+    body.appendChild(ph);
+  }
+
+  pane.append(bar, body);
+  return pane;
+}
+
+function render() {
+  stage.dataset.layout = state.layout;
+  stage.replaceChildren();
+  const n = PANE_COUNT[state.layout];
+  for (let i = 0; i < n; i++) stage.appendChild(buildPane(i));
+  syncSegs();
+}
+
+function syncPrompt() {
+  document.getElementById("promptPop").textContent = PROMPTS[state.sim];
+}
+
+function syncSegs() {
+  syncPrompt();
+  for (const b of document.querySelectorAll("#simSeg button"))
+    b.setAttribute("aria-pressed", String(b.dataset.sim === state.sim));
+  for (const b of document.querySelectorAll("#layoutSeg button"))
+    b.setAttribute("aria-pressed", String(b.dataset.layout === state.layout));
+}
+
+document.getElementById("simSeg").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-sim]");
+  if (!b || b.dataset.sim === state.sim) return;
+  state.sim = b.dataset.sim;
+  // keep loaded state: already-active panes swap straight to the new sim
+  syncHash();
+  render();
+});
+
+document.getElementById("layoutSeg").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-layout]");
+  if (!b || b.dataset.layout === state.layout) return;
+  state.layout = b.dataset.layout;
+  // in single view, drop the extra panes' running sims
+  const n = PANE_COUNT[state.layout];
+  for (let i = n; i < 4; i++) state.loaded[i] = false;
+  syncHash();
+  render();
+});
+
+syncHash();
+render();
+</script>
+</body>
+</html>

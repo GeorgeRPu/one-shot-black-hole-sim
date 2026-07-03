@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kerr Black Hole</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; }
+canvas { display: block; width: 100vw; height: 100vh; }
+#ui {
+  position: absolute; top: 10px; left: 10px; color: #ccc;
+  font: 13px/1.6 monospace; pointer-events: none;
+  text-shadow: 0 0 4px #000;
+}
+#controls {
+  position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 12px;
+  color: #ccc; font: 13px monospace;
+  background: rgba(0,0,0,0.6); padding: 8px 16px; border-radius: 8px;
+}
+#controls input[type=range] { width: 180px; cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">Kerr Black Hole<br>Drag to orbit · Scroll to zoom</div>
+<div id="controls">
+  <label>Spin <i>a</i>:</label>
+  <input type="range" id="spinSlider" min="0" max="0.998" step="0.002" value="0.6">
+  <span id="spinVal">0.600</span>
+</div>
+<script>
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2');
+if (!gl) { document.body.innerHTML = '<p style="color:red;padding:2em">WebGL 2 required</p>'; throw 'no webgl2'; }
+
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  gl.viewport(0, 0, W, H);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Camera
+let camTheta = 1.2, camPhi = 0.0, camDist = 14.0;
+let dragging = false, lastX, lastY;
+
+canvas.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+window.addEventListener('mouseup', () => dragging = false);
+window.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  camPhi -= (e.clientX - lastX) * 0.005;
+  camTheta = Math.max(0.05, Math.min(Math.PI - 0.05, camTheta + (e.clientY - lastY) * 0.005));
+  lastX = e.clientX; lastY = e.clientY;
+});
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  camDist = Math.max(3.0, Math.min(50.0, camDist * (1 + e.deltaY * 0.001)));
+}, { passive: false });
+
+// Touch
+let lastTouchDist = 0;
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (e.touches.length === 1) { dragging = true; lastX = e.touches[0].clientX; lastY = e.touches[0].clientY; }
+  if (e.touches.length === 2) {
+    const dx = e.touches[0].clientX - e.touches[1].clientX;
+    const dy = e.touches[0].clientY - e.touches[1].clientY;
+    lastTouchDist = Math.sqrt(dx*dx + dy*dy);
+  }
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (e.touches.length === 1 && dragging) {
+    camPhi -= (e.touches[0].clientX - lastX) * 0.005;
+    camTheta = Math.max(0.05, Math.min(Math.PI - 0.05, camTheta + (e.touches[0].clientY - lastY) * 0.005));
+    lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
+  }
+  if (e.touches.length === 2) {
+    const dx = e.touches[0].clientX - e.touches[1].clientX;
+    const dy = e.touches[0].clientY - e.touches[1].clientY;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    camDist = Math.max(3.0, Math.min(50.0, camDist * (1 + (lastTouchDist - dist) * 0.005)));
+    lastTouchDist = dist;
+  }
+}, { passive: false });
+canvas.addEventListener('touchend', () => dragging = false);
+
+// Spin control
+let spin = 0.6;
+const spinSlider = document.getElementById('spinSlider');
+const spinVal = document.getElementById('spinVal');
+spinSlider.addEventListener('input', () => {
+  spin = parseFloat(spinSlider.value);
+  spinVal.textContent = spin.toFixed(3);
+});
+
+// Star texture
+const starSize = 1024;
+const starData = new Uint8Array(starSize * starSize * 4);
+function mulberry32(a) { return function() { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const rng = mulberry32(123);
+for (let i = 0; i < starSize * starSize; i++) {
+  const r = rng();
+  if (r < 0.003) {
+    const brightness = 80 + rng() * 175;
+    const temp = rng();
+    const idx = i * 4;
+    if (temp < 0.2) { starData[idx] = brightness*0.7; starData[idx+1] = brightness*0.8; starData[idx+2] = brightness; }
+    else if (temp > 0.8) { starData[idx] = brightness; starData[idx+1] = brightness*0.85; starData[idx+2] = brightness*0.6; }
+    else { starData[idx] = brightness; starData[idx+1] = brightness; starData[idx+2] = brightness; }
+    starData[idx+3] = 255;
+  }
+}
+const starTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, starTex);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, starSize, starSize, 0, gl.RGBA, gl.UNSIGNED_BYTE, starData);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+
+const vsSource = `#version 300 es
+in vec2 aPos;
+out vec2 vUV;
+void main() {
+  vUV = aPos * 0.5 + 0.5;
+  gl_Position = vec4(aPos, 0, 1);
+}`;
+
+const fsSource = `#version 300 es
+precision highp float;
+in vec2 vUV;
+out vec4 fragColor;
+
+uniform vec2 uResolution;
+uniform vec3 uCamPos;
+uniform mat3 uCamRot;
+uniform sampler2D uStars;
+uniform float uTime;
+uniform float uSpin;
+
+const float M = 1.0;
+const float PI = 3.14159265;
+
+// Kerr metric helper: Boyer-Lindquist coordinates
+// Sigma = r² + a²cos²θ
+// Delta = r² - 2Mr + a²
+
+// ISCO radius for Kerr (prograde)
+float kerrISCO(float a) {
+  float z1 = 1.0 + pow(1.0 - a*a, 1.0/3.0) * (pow(1.0 + a, 1.0/3.0) + pow(max(0.0, 1.0 - a), 1.0/3.0));
+  float z2 = sqrt(3.0 * a * a + z1 * z1);
+  return 3.0 + z2 - sqrt((3.0 - z1) * (3.0 + z1 + 2.0 * z2));
+}
+
+vec2 dirToUV(vec3 d) {
+  float phi = atan(d.z, d.x);
+  float theta = acos(clamp(d.y, -1.0, 1.0));
+  return vec2(phi / (2.0 * PI) + 0.5, theta / PI);
+}
+
+// Disk emission with Doppler beaming and redshift
+vec3 diskColor(float r, float phi, float a) {
+  float risco = kerrISCO(a);
+  float rOuter = 12.0;
+
+  if (r < risco || r > rOuter) return vec3(0.0);
+
+  // Temperature profile: T ~ r^(-3/4) with inner edge correction
+  float x = sqrt(r);
+  float xisco = sqrt(risco);
+  // Novikov-Thorne flux: simplified radial profile
+  float flux = (1.0 - xisco / x) / (x * x * x);
+  flux = max(flux, 0.0);
+
+  // Color from temperature
+  float temp = pow(flux, 0.25);
+  vec3 hot = vec3(1.0, 0.95, 0.85);
+  vec3 warm = vec3(1.0, 0.55, 0.15);
+  vec3 cool = vec3(0.7, 0.15, 0.03);
+
+  float t = clamp(temp * 4.0, 0.0, 1.0);
+  vec3 col;
+  if (t > 0.5) col = mix(warm, hot, (t - 0.5) * 2.0);
+  else col = mix(cool, warm, t * 2.0);
+
+  // Keplerian orbital velocity for Kerr
+  // v_phi = (M^(1/2)) / (r^(3/2) + a*M^(1/2))  (prograde)
+  float vOrb = 1.0 / (x * r + a);
+
+  // Doppler factor: g = 1/gamma(1 - v*sin(phi_obs))
+  // For disk in equatorial plane, observer angle encoded in phi
+  float beta = vOrb * r; // approximate v/c
+  beta = clamp(beta, 0.0, 0.95);
+  float gamma = 1.0 / sqrt(max(0.01, 1.0 - beta * beta));
+
+  // phi here is the azimuthal angle in the disk plane
+  // Approaching side has sin(phi) > 0 in our convention
+  float doppler = 1.0 / (gamma * (1.0 - beta * sin(phi)));
+  doppler = clamp(doppler, 0.2, 5.0);
+
+  // Gravitational redshift: sqrt(1 - Rs/r) for Schwarzschild,
+  // more complex for Kerr but approximate:
+  float Delta = r * r - 2.0 * r + a * a;
+  float gtt = -(1.0 - 2.0 * r / (r * r + a * a * 0.01)); // approx at equator (theta=pi/2)
+  float gravRedshift = sqrt(max(0.01, -gtt));
+
+  // Combined frequency shift
+  float g = doppler * gravRedshift;
+
+  // I_obs/I_em = g^4 (relativistic invariant), use g^3 for flux
+  float gFactor = g * g * g;
+
+  // Turbulence
+  float pattern = 0.7 + 0.3 * sin(phi * 8.0 + r * 1.5 - uTime * 0.4);
+  pattern *= 0.8 + 0.2 * sin(phi * 15.0 - r * 4.0 + uTime * 0.25);
+
+  float brightness = flux * 60.0 * gFactor * pattern;
+
+  // Shift hue with Doppler: blueshifted = hotter, redshifted = cooler
+  if (g > 1.0) {
+    col = mix(col, hot, clamp((g - 1.0) * 0.5, 0.0, 0.8));
+  } else {
+    col = mix(col, cool * 0.5, clamp((1.0 - g) * 0.8, 0.0, 0.9));
+  }
+
+  return col * brightness;
+}
+
+void main() {
+  vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution) / uResolution.y;
+  float a = uSpin; // spin parameter
+
+  vec3 rd = normalize(uCamRot * vec3(uv, -1.2));
+  vec3 ro = uCamPos;
+
+  // Ray march through Kerr spacetime
+  // We use the pseudo-Newtonian approach with Kerr corrections:
+  // The key difference from Schwarzschild is the frame-dragging term
+
+  vec3 pos = ro;
+  vec3 vel = rd;
+  float dt = 0.05;
+
+  vec3 color = vec3(0.0);
+  bool hit = false;
+  float prevY = pos.y;
+  float risco = kerrISCO(a);
+
+  // Event horizon: r+ = M + sqrt(M² - a²)
+  float rPlus = 1.0 + sqrt(max(0.0, 1.0 - a * a));
+
+  for (int i = 0; i < 500; i++) {
+    float r = length(pos);
+    float r2 = r * r;
+
+    if (r < rPlus * 1.02) {
+      color = vec3(0.0);
+      hit = true;
+      break;
+    }
+
+    if (r > 60.0) {
+      color += texture(uStars, dirToUV(normalize(vel))).rgb;
+      hit = true;
+      break;
+    }
+
+    // Kerr geodesic acceleration
+    // In Boyer-Lindquist-like Cartesian coordinates:
+    // The spin axis is along y
+
+    float cosTheta = pos.y / r;
+    float sinTheta2 = 1.0 - cosTheta * cosTheta;
+    float Sigma = r2 + a * a * cosTheta * cosTheta;
+    float Delta = r2 - 2.0 * M * r + a * a;
+
+    vec3 rhat = pos / r;
+    float rdot = dot(vel, rhat);
+
+    // Angular momentum about spin axis (y-axis)
+    vec3 Lvec = cross(pos, vel);
+    float Ly = Lvec.y;
+    float L2 = dot(Lvec, Lvec);
+
+    // Schwarzschild-like radial acceleration
+    vec3 accel = -M / (Sigma * r) * pos;
+
+    // GR correction (light bending enhancement)
+    accel += 3.0 * M * L2 / (Sigma * r2 * r2 * r) * pos;
+
+    // Kerr frame-dragging: adds a torque around the spin axis
+    // Frame dragging angular velocity: omega_fd = 2Mar/(Sigma * (r² + a²) + 2Ma²r*sin²θ)
+    float omega_fd = 2.0 * M * a * r / (Sigma * (r2 + a * a) + 2.0 * M * a * a * r * sinTheta2);
+
+    // Frame-dragging force: perpendicular to both spin axis and position
+    // Effectively adds d(phi)/dt contribution
+    vec3 yAxis = vec3(0.0, 1.0, 0.0);
+    vec3 dragDir = cross(yAxis, pos);
+    float dragMag = length(dragDir);
+    if (dragMag > 1e-8) {
+      dragDir /= dragMag;
+      // The frame-dragging acceleration
+      float fdAccel = omega_fd * 2.0 * rdot;
+      accel += fdAccel * dragDir;
+
+      // Coriolis-like correction
+      vec3 velPerp = vel - dot(vel, rhat) * rhat;
+      accel += omega_fd * cross(yAxis, velPerp) * 0.5;
+    }
+
+    // Quadrupole correction from spin (oblate geometry)
+    float a2 = a * a;
+    if (a2 > 1e-6) {
+      // Extra acceleration from Sigma != r²
+      float sigmaCorr = -a2 * cosTheta * cosTheta / (Sigma * r);
+      accel += sigmaCorr * M / r * pos;
+
+      // Polar force component
+      vec3 thetaDir = vec3(0.0, 1.0, 0.0) - cosTheta * rhat;
+      float thetaDirLen = length(thetaDir);
+      if (thetaDirLen > 1e-8) {
+        thetaDir /= thetaDirLen;
+        float polarForce = a2 * M * 2.0 * cosTheta * sinTheta2 / (Sigma * Sigma);
+        accel += polarForce * thetaDir;
+      }
+    }
+
+    // Velocity Verlet
+    vec3 newPos = pos + vel * dt + 0.5 * accel * dt * dt;
+    float nr = length(newPos);
+
+    // Recompute acceleration at new position (simplified for performance)
+    vec3 nrhat = newPos / nr;
+    float nrdot = dot(vel, nrhat);
+    float ncosTheta = newPos.y / nr;
+    float nsinTheta2 = 1.0 - ncosTheta * ncosTheta;
+    float nSigma = nr * nr + a * a * ncosTheta * ncosTheta;
+    vec3 nLvec = cross(newPos, vel);
+    float nL2 = dot(nLvec, nLvec);
+
+    vec3 newAccel = -M / (nSigma * nr) * newPos;
+    newAccel += 3.0 * M * nL2 / (nSigma * nr * nr * nr * nr * nr) * newPos;
+
+    float nomega = 2.0 * M * a * nr / (nSigma * (nr*nr + a*a) + 2.0*M*a*a*nr*nsinTheta2);
+    vec3 ndragDir = cross(yAxis, newPos);
+    float ndragMag = length(ndragDir);
+    if (ndragMag > 1e-8) {
+      ndragDir /= ndragMag;
+      newAccel += nomega * 2.0 * nrdot * ndragDir;
+      vec3 nvelPerp = vel - dot(vel, nrhat) * nrhat;
+      newAccel += nomega * cross(yAxis, nvelPerp) * 0.5;
+    }
+
+    vel += 0.5 * (accel + newAccel) * dt;
+    pos = newPos;
+
+    // Disk crossing check
+    if (prevY * pos.y < 0.0) {
+      float frac = abs(prevY) / (abs(prevY) + abs(pos.y));
+      vec3 crossPos = mix(pos - vel * dt, pos, frac);
+      float cr = length(crossPos);
+      float cphi = atan(crossPos.z, crossPos.x);
+
+      vec3 dc = diskColor(cr, cphi, a);
+      if (length(dc) > 0.0) {
+        float opacity = 0.9;
+        color = color * (1.0 - opacity) + dc * opacity;
+      }
+    }
+    prevY = pos.y;
+  }
+
+  if (!hit && length(color) < 0.001) {
+    color += texture(uStars, dirToUV(normalize(vel))).rgb;
+  }
+
+  // Tone map
+  color = color / (1.0 + color);
+  color = pow(color, vec3(1.0/2.2));
+
+  fragColor = vec4(color, 1.0);
+}`;
+
+function compileShader(src, type) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(s));
+    return null;
+  }
+  return s;
+}
+
+const vs = compileShader(vsSource, gl.VERTEX_SHADER);
+const fs = compileShader(fsSource, gl.FRAGMENT_SHADER);
+const prog = gl.createProgram();
+gl.attachShader(prog, vs);
+gl.attachShader(prog, fs);
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) console.error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(prog, 'aPos');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+const uRes = gl.getUniformLocation(prog, 'uResolution');
+const uCamPosLoc = gl.getUniformLocation(prog, 'uCamPos');
+const uCamRotLoc = gl.getUniformLocation(prog, 'uCamRot');
+const uTimeLoc = gl.getUniformLocation(prog, 'uTime');
+const uSpinLoc = gl.getUniformLocation(prog, 'uSpin');
+const uStarsLoc = gl.getUniformLocation(prog, 'uStars');
+
+gl.uniform1i(uStarsLoc, 0);
+gl.activeTexture(gl.TEXTURE0);
+gl.bindTexture(gl.TEXTURE_2D, starTex);
+
+function render(t) {
+  const time = t * 0.001;
+  const cx = camDist * Math.sin(camTheta) * Math.cos(camPhi);
+  const cy = camDist * Math.cos(camTheta);
+  const cz = camDist * Math.sin(camTheta) * Math.sin(camPhi);
+
+  const fwd = [-cx, -cy, -cz];
+  const fl = Math.sqrt(fwd[0]*fwd[0]+fwd[1]*fwd[1]+fwd[2]*fwd[2]);
+  fwd[0]/=fl; fwd[1]/=fl; fwd[2]/=fl;
+
+  const up0 = [0,1,0];
+  const right = [
+    fwd[1]*up0[2]-fwd[2]*up0[1],
+    fwd[2]*up0[0]-fwd[0]*up0[2],
+    fwd[0]*up0[1]-fwd[1]*up0[0]
+  ];
+  const rl = Math.sqrt(right[0]*right[0]+right[1]*right[1]+right[2]*right[2]);
+  if (rl>1e-6){right[0]/=rl;right[1]/=rl;right[2]/=rl;}
+
+  const up = [
+    right[1]*fwd[2]-right[2]*fwd[1],
+    right[2]*fwd[0]-right[0]*fwd[2],
+    right[0]*fwd[1]-right[1]*fwd[0]
+  ];
+
+  gl.uniform2f(uRes, W, H);
+  gl.uniform3f(uCamPosLoc, cx, cy, cz);
+  gl.uniformMatrix3fv(uCamRotLoc, false, [
+    right[0], up[0], fwd[0],
+    right[1], up[1], fwd[1],
+    right[2], up[2], fwd[2]
+  ]);
+  gl.uniform1f(uTimeLoc, time);
+  gl.uniform1f(uSpinLoc, spin);
+
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+</script>
+</body>
+</html>

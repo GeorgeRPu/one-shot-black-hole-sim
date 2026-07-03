@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Schwarzschild Black Hole</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; }
+canvas { display: block; width: 100vw; height: 100vh; }
+#info {
+  position: absolute; top: 10px; left: 10px; color: #aaa;
+  font: 13px/1.4 monospace; pointer-events: none;
+  text-shadow: 0 0 4px #000;
+}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="info">Schwarzschild Black Hole<br>Drag to orbit · Scroll to zoom</div>
+<script>
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2');
+if (!gl) { document.body.innerHTML = '<p style="color:red;padding:2em">WebGL 2 required</p>'; throw 'no webgl2'; }
+
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  gl.viewport(0, 0, W, H);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Camera state
+let camTheta = 0.3, camPhi = 0.8, camDist = 12.0;
+let dragging = false, lastX, lastY;
+
+canvas.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+window.addEventListener('mouseup', () => dragging = false);
+window.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  camPhi -= (e.clientX - lastX) * 0.005;
+  camTheta = Math.max(0.01, Math.min(Math.PI - 0.01, camTheta + (e.clientY - lastY) * 0.005));
+  lastX = e.clientX; lastY = e.clientY;
+});
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  camDist = Math.max(3.5, Math.min(50.0, camDist * (1 + e.deltaY * 0.001)));
+}, { passive: false });
+
+// Touch support
+let lastTouchDist = 0;
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (e.touches.length === 1) { dragging = true; lastX = e.touches[0].clientX; lastY = e.touches[0].clientY; }
+  if (e.touches.length === 2) {
+    const dx = e.touches[0].clientX - e.touches[1].clientX;
+    const dy = e.touches[0].clientY - e.touches[1].clientY;
+    lastTouchDist = Math.sqrt(dx*dx + dy*dy);
+  }
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (e.touches.length === 1 && dragging) {
+    camPhi -= (e.touches[0].clientX - lastX) * 0.005;
+    camTheta = Math.max(0.01, Math.min(Math.PI - 0.01, camTheta + (e.touches[0].clientY - lastY) * 0.005));
+    lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
+  }
+  if (e.touches.length === 2) {
+    const dx = e.touches[0].clientX - e.touches[1].clientX;
+    const dy = e.touches[0].clientY - e.touches[1].clientY;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    camDist = Math.max(3.5, Math.min(50.0, camDist * (1 + (lastTouchDist - dist) * 0.005)));
+    lastTouchDist = dist;
+  }
+}, { passive: false });
+canvas.addEventListener('touchend', () => dragging = false);
+
+// Star texture
+const starSize = 1024;
+const starData = new Uint8Array(starSize * starSize * 4);
+// Seed a procedural starfield
+function mulberry32(a) { return function() { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const rng = mulberry32(42);
+for (let i = 0; i < starSize * starSize; i++) {
+  const r = rng();
+  if (r < 0.003) {
+    const brightness = 80 + rng() * 175;
+    const temp = rng();
+    const idx = i * 4;
+    if (temp < 0.2) { starData[idx] = brightness * 0.7; starData[idx+1] = brightness * 0.8; starData[idx+2] = brightness; }
+    else if (temp > 0.8) { starData[idx] = brightness; starData[idx+1] = brightness * 0.85; starData[idx+2] = brightness * 0.6; }
+    else { starData[idx] = brightness; starData[idx+1] = brightness; starData[idx+2] = brightness; }
+    starData[idx+3] = 255;
+  } else if (r < 0.004) {
+    const b = 20 + rng() * 30;
+    const idx = i * 4;
+    starData[idx] = b; starData[idx+1] = b; starData[idx+2] = b; starData[idx+3] = 255;
+  }
+}
+const starTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, starTex);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, starSize, starSize, 0, gl.RGBA, gl.UNSIGNED_BYTE, starData);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+
+// Shaders
+const vsSource = `#version 300 es
+in vec2 aPos;
+out vec2 vUV;
+void main() {
+  vUV = aPos * 0.5 + 0.5;
+  gl_Position = vec4(aPos, 0, 1);
+}`;
+
+const fsSource = `#version 300 es
+precision highp float;
+in vec2 vUV;
+out vec4 fragColor;
+
+uniform vec2 uResolution;
+uniform vec3 uCamPos;
+uniform mat3 uCamRot;
+uniform sampler2D uStars;
+uniform float uTime;
+
+const float M = 1.0;       // black hole mass (sets Rs = 2M)
+const float Rs = 2.0;      // Schwarzschild radius
+const float PI = 3.14159265;
+
+// Accretion disk parameters
+const float DISK_INNER = 3.0;  // ISCO for Schwarzschild
+const float DISK_OUTER = 10.0;
+
+// Convert direction to equirectangular UV for star lookup
+vec2 dirToUV(vec3 d) {
+  float phi = atan(d.z, d.x);
+  float theta = acos(clamp(d.y, -1.0, 1.0));
+  return vec2(phi / (2.0 * PI) + 0.5, theta / PI);
+}
+
+// Accretion disk color — temperature profile T ~ r^(-3/4)
+vec3 diskColor(float r, float phi) {
+  float t = pow(DISK_INNER / r, 0.75);
+  // Hot inner disk → white/blue, cooler outer → orange/red
+  vec3 hot = vec3(1.0, 0.95, 0.9);
+  vec3 warm = vec3(1.0, 0.6, 0.2);
+  vec3 cool = vec3(0.8, 0.2, 0.05);
+  vec3 col;
+  if (t > 0.5) col = mix(warm, hot, (t - 0.5) * 2.0);
+  else col = mix(cool, warm, t * 2.0);
+
+  // Add turbulence pattern
+  float pattern = 0.7 + 0.3 * sin(phi * 6.0 + r * 2.0 - uTime * 0.5);
+  pattern *= 0.8 + 0.2 * sin(phi * 13.0 - r * 5.0 + uTime * 0.3);
+
+  float brightness = t * t * 2.5 * pattern;
+  return col * brightness;
+}
+
+// Integrate a geodesic in Schwarzschild spacetime
+// Using effective potential approach in spherical coords
+void main() {
+  vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution) / uResolution.y;
+
+  // Ray direction in camera space
+  vec3 rd = normalize(uCamRot * vec3(uv, -1.2));
+  vec3 ro = uCamPos;
+
+  // Integrate the photon path using Verlet in Schwarzschild geometry
+  // d²r/dλ² = -dV/dr where V_eff = L²/(2r²)(1 - Rs/r)
+  // We trace in 3D Cartesian but the physics is spherically symmetric
+
+  vec3 pos = ro;
+  float dt = 0.06;
+  vec3 vel = rd;
+
+  vec3 color = vec3(0.0);
+  bool hit = false;
+
+  float prevY = pos.y;
+
+  for (int i = 0; i < 400; i++) {
+    float r = length(pos);
+
+    // Fell into singularity
+    if (r < Rs * 1.01) {
+      color = vec3(0.0);
+      hit = true;
+      break;
+    }
+
+    // Escaped to infinity
+    if (r > 60.0) {
+      color = texture(uStars, dirToUV(normalize(vel))).rgb;
+      hit = true;
+      break;
+    }
+
+    // Gravitational acceleration: Schwarzschild geodesic in isotropic-ish coords
+    // For a photon: d²x/dλ² = -(Rs/(r²)) * [v² r̂ - 2(v·r̂)v + Rs/(2r)(3(v·r̂)² - v²)r̂ ]
+    // Simplified: Newtonian-like with GR correction
+    // a = -GM/r² * r̂ * (1 + 3L²/(r²c²))
+    // For null geodesics in Schwarzschild, the effective force gives:
+    // a = -Rs/(2r²) r̂ + 3Rs/(2r⁴) L² r̂ (with c=1)
+
+    vec3 rhat = pos / r;
+    float rdot = dot(vel, rhat);
+    vec3 Lvec = cross(pos, vel);
+    float L2 = dot(Lvec, Lvec);
+
+    // Schwarzschild geodesic acceleration for photons
+    // From the effective potential: the full 3D acceleration is
+    // a = -Rs/(2r³) pos + 3Rs L²/(2r⁵) pos   [Newtonian + GR correction]
+    // But we need the tangential component too. Using the exact form:
+    // a_r = -Rs/(2r²)(1 - Rs/r) + L²/r³(1 - 3Rs/(2r))
+    // For the full 3D version:
+    float coeff = -1.5 * Rs / (r * r * r * r * r);
+    vec3 accel = coeff * (L2 * pos - 2.0 * r * r * rdot * vel);
+    // Add radial Schwarzschild correction
+    accel += -Rs / (2.0 * r * r * r) * pos;
+    accel += 1.5 * Rs * L2 / (r * r * r * r * r) * pos;
+
+    // Verlet integration
+    vec3 newPos = pos + vel * dt + 0.5 * accel * dt * dt;
+
+    // Recompute acceleration at new position
+    float nr = length(newPos);
+    vec3 nrhat = newPos / nr;
+    float nrdot = dot(vel, nrhat);
+    vec3 nLvec = cross(newPos, vel);
+    float nL2 = dot(nLvec, nLvec);
+    float ncoeff = -1.5 * Rs / (nr * nr * nr * nr * nr);
+    vec3 newAccel = ncoeff * (nL2 * newPos - 2.0 * nr * nr * nrdot * vel);
+    newAccel += -Rs / (2.0 * nr * nr * nr) * newPos;
+    newAccel += 1.5 * Rs * nL2 / (nr * nr * nr * nr * nr) * newPos;
+
+    vel = vel + 0.5 * (accel + newAccel) * dt;
+    pos = newPos;
+
+    // Check disk crossing (y = 0 plane)
+    if (prevY * pos.y < 0.0 || (prevY == 0.0 && pos.y != 0.0)) {
+      // Interpolate to find crossing point
+      float frac = abs(prevY) / (abs(prevY) + abs(pos.y));
+      vec3 crossPos = mix(pos - vel * dt, pos, frac);
+      float cr = length(crossPos);
+      if (cr > DISK_INNER && cr < DISK_OUTER) {
+        float cphi = atan(crossPos.z, crossPos.x);
+        vec3 dc = diskColor(cr, cphi);
+
+        // Gravitational redshift: observed_freq / emitted_freq = sqrt(1 - Rs/r)
+        float redshift = sqrt(max(0.001, 1.0 - Rs / cr));
+        dc *= redshift;
+
+        // Blend: closer to camera = more opaque
+        float opacity = 0.85;
+        color = color * (1.0 - opacity) + dc * opacity;
+      }
+    }
+    prevY = pos.y;
+  }
+
+  if (!hit && length(color) == 0.0) {
+    color = texture(uStars, dirToUV(normalize(vel))).rgb;
+  }
+
+  // Tone mapping
+  color = color / (1.0 + color);
+  color = pow(color, vec3(1.0 / 2.2));
+
+  fragColor = vec4(color, 1.0);
+}`;
+
+function compileShader(src, type) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(s));
+    return null;
+  }
+  return s;
+}
+
+const vs = compileShader(vsSource, gl.VERTEX_SHADER);
+const fs = compileShader(fsSource, gl.FRAGMENT_SHADER);
+const prog = gl.createProgram();
+gl.attachShader(prog, vs);
+gl.attachShader(prog, fs);
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+  console.error(gl.getProgramInfoLog(prog));
+}
+gl.useProgram(prog);
+
+// Fullscreen quad
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(prog, 'aPos');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+const uRes = gl.getUniformLocation(prog, 'uResolution');
+const uCamPos = gl.getUniformLocation(prog, 'uCamPos');
+const uCamRot = gl.getUniformLocation(prog, 'uCamRot');
+const uTime = gl.getUniformLocation(prog, 'uTime');
+const uStarsLoc = gl.getUniformLocation(prog, 'uStars');
+
+gl.uniform1i(uStarsLoc, 0);
+gl.activeTexture(gl.TEXTURE0);
+gl.bindTexture(gl.TEXTURE_2D, starTex);
+
+function render(t) {
+  const time = t * 0.001;
+
+  const cx = camDist * Math.sin(camTheta) * Math.cos(camPhi);
+  const cy = camDist * Math.cos(camTheta);
+  const cz = camDist * Math.sin(camTheta) * Math.sin(camPhi);
+
+  // Camera look-at matrix
+  const fwd = [-cx, -cy, -cz];
+  const fwdLen = Math.sqrt(fwd[0]*fwd[0]+fwd[1]*fwd[1]+fwd[2]*fwd[2]);
+  fwd[0] /= fwdLen; fwd[1] /= fwdLen; fwd[2] /= fwdLen;
+
+  const worldUp = [0, 1, 0];
+  const right = [
+    fwd[1]*worldUp[2] - fwd[2]*worldUp[1],
+    fwd[2]*worldUp[0] - fwd[0]*worldUp[2],
+    fwd[0]*worldUp[1] - fwd[1]*worldUp[0]
+  ];
+  const rLen = Math.sqrt(right[0]*right[0]+right[1]*right[1]+right[2]*right[2]);
+  if (rLen > 1e-6) { right[0] /= rLen; right[1] /= rLen; right[2] /= rLen; }
+
+  const up = [
+    right[1]*fwd[2] - right[2]*fwd[1],
+    right[2]*fwd[0] - right[0]*fwd[2],
+    right[0]*fwd[1] - right[1]*fwd[0]
+  ];
+
+  gl.uniform2f(uRes, W, H);
+  gl.uniform3f(uCamPos, cx, cy, cz);
+  gl.uniformMatrix3fv(uCamRot, false, [
+    right[0], up[0], fwd[0],
+    right[1], up[1], fwd[1],
+    right[2], up[2], fwd[2]
+  ]);
+  gl.uniform1f(uTime, time);
+
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+</script>
+</body>
+</html>

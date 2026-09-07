@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Schwarzschild Black Hole — real-time GR ray tracer</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#000;color:#cfd3dc;font:13px/1.45 -apple-system,system-ui,"Segoe UI",Roboto,sans-serif}
+#c{display:block;width:100vw;height:100vh;cursor:grab;touch-action:none}
+#c.drag{cursor:grabbing}
+.panel{position:fixed;background:rgba(8,10,16,.62);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:10px 12px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
+#info{left:14px;top:14px;pointer-events:none;user-select:none;max-width:320px}
+#info h1{font-size:15px;margin:0 0 4px;color:#fff;font-weight:600}
+#info .dim{color:#8b93a3}
+#ctl{right:14px;top:14px;min-width:200px}
+#ctl label{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:6px 0;cursor:pointer}
+#ctl input[type=range]{width:96px}
+#stats{left:14px;bottom:14px;pointer-events:none;font-variant-numeric:tabular-nums;color:#8b93a3}
+#err{display:none;position:fixed;inset:0;place-items:center;text-align:center;padding:20px;color:#fff}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="info" class="panel">
+  <h1>Schwarzschild black hole</h1>
+  <div>Null geodesics integrated per pixel (RK4, exact orbit equation u&Prime;&nbsp;=&nbsp;&minus;u&nbsp;+&nbsp;3Mu&sup2;).</div>
+  <div class="dim">Thin Keplerian disk from the ISCO (6M) outward, with Doppler beaming and gravitational redshift. Units G&nbsp;=&nbsp;c&nbsp;=&nbsp;M&nbsp;=&nbsp;1, r<sub>s</sub>&nbsp;=&nbsp;2.</div>
+  <div class="dim" style="margin-top:6px">Drag to orbit &middot; scroll / pinch to zoom</div>
+</div>
+<div id="ctl" class="panel">
+  <label><span>Accretion disk</span><input type="checkbox" id="disk" checked></label>
+  <label><span>Doppler + redshift</span><input type="checkbox" id="rel" checked></label>
+  <label><span>Quality</span><input type="range" id="q" min="0" max="2" step="1" value="1"></label>
+</div>
+<div id="stats" class="panel"></div>
+<div id="err"><div><h2>WebGL2 is required</h2><p>Your browser or GPU does not expose a WebGL2 context.</p></div></div>
+<script>
+(() => {
+'use strict';
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', {antialias:false, alpha:false, depth:false, stencil:false, powerPreference:'high-performance'});
+if (!gl) { document.getElementById('err').style.display = 'grid'; return; }
+
+const VS = `#version 300 es
+void main(){vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));gl_Position=vec4(p*2.0-1.0,0.0,1.0);}`;
+
+const FS = `#version 300 es
+precision highp float;
+precision highp int;
+out vec4 O;
+uniform vec2  uRes;
+uniform vec3  uCam;      // camera position (M units), black hole at origin, disk in y=0 plane
+uniform mat3  uBasis;    // columns: right, up, forward
+uniform float uFocal;    // 1/tan(fov/2)
+uniform float uTime;     // coordinate time in M
+uniform int   uMaxSteps;
+uniform float uDiskOn, uRel, uDiskIn, uDiskOut, uTpeak, uTmax;
+const float PI = 3.141592653589793;
+
+// ---------- hashing / noise ----------
+float hash12(vec2 p){vec3 p3=fract(vec3(p.xyx)*.1031);p3+=dot(p3,p3.yzx+33.33);return fract((p3.x+p3.y)*p3.z);}
+vec3  hash32(vec2 p){vec3 p3=fract(vec3(p.xyx)*vec3(.1031,.1030,.0973));p3+=dot(p3,p3.yxz+33.33);return fract((p3.xxy+p3.yzz)*p3.zyx);}
+float hash13(vec3 p3){p3=fract(p3*.1031);p3+=dot(p3,p3.zyx+31.32);return fract((p3.x+p3.y)*p3.z);}
+float noise3(vec3 p){
+  vec3 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
+  return mix(mix(mix(hash13(i),hash13(i+vec3(1,0,0)),f.x),mix(hash13(i+vec3(0,1,0)),hash13(i+vec3(1,1,0)),f.x),f.y),
+             mix(mix(hash13(i+vec3(0,0,1)),hash13(i+vec3(1,0,1)),f.x),mix(hash13(i+vec3(0,1,1)),hash13(i+vec3(1,1,1)),f.x),f.y),f.z);
+}
+// value noise periodic in x (period per) so the disk texture wraps in azimuth
+float pnoise(vec2 p, float per){
+  vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
+  float x0=mod(i.x,per), x1=mod(i.x+1.0,per);
+  return mix(mix(hash12(vec2(x0,i.y)),hash12(vec2(x1,i.y)),f.x),mix(hash12(vec2(x0,i.y+1.0)),hash12(vec2(x1,i.y+1.0)),f.x),f.y);
+}
+
+// ---------- blackbody ----------
+// Planck spectral radiance at 610/550/465 nm, white-balanced so 7500 K -> (1,1,1).
+// Since I_nu/nu^3 is invariant, a blackbody at T seen with redshift factor g is exactly a blackbody at g*T,
+// so evaluating this at g*T gives both the colour shift and the g^4 beaming for free.
+vec3 planck(float T){
+  T=max(T,200.0);
+  vec3 x=vec3(23587.0,26160.0,30942.0)/T;      // hc/(lambda k T)
+  return vec3(0.596,1.0,2.315)/(exp(x)-1.0)/vec3(0.02682,0.03153,0.03801);
+}
+
+// ---------- procedural sky ----------
+vec3 stars(vec3 d){
+  vec3 ad=abs(d); vec2 uv; float f;
+  if(ad.x>=ad.y&&ad.x>=ad.z){uv=d.yz/ad.x;f=d.x>0.0?0.0:1.0;}
+  else if(ad.y>=ad.z){uv=d.xz/ad.y;f=d.y>0.0?2.0:3.0;}
+  else{uv=d.xy/ad.z;f=d.z>0.0?4.0:5.0;}
+  vec2 g=(uv*0.5+0.5)*72.0;
+  vec2 cell=floor(g);
+  vec2 seed=vec2(f*101.0,f*37.0);
+  vec3 col=vec3(0.0);
+  for(int j=-1;j<=1;j++)for(int i=-1;i<=1;i++){
+    vec2 c=cell+vec2(float(i),float(j));
+    vec3 h=hash32(c+seed);
+    if(h.z<0.3){
+      vec2 dp=g-(c+h.xy);
+      float d2=dot(dp,dp);
+      float m=hash12(c*1.37+seed+5.0);
+      float br=0.22*m*m+3.5*pow(m,22.0);
+      float t=hash12(c*0.71+seed+9.0);
+      vec3 sc=mix(vec3(1.0,0.72,0.48),vec3(0.62,0.76,1.0),t);
+      col+=sc*br*exp(-d2*45.0);
+    }
+  }
+  vec3 nb=normalize(vec3(0.35,1.0,0.45));
+  float band=exp(-pow(dot(d,nb)*3.2,2.0));
+  float nz=noise3(d*3.0)*0.55+noise3(d*7.0)*0.3+noise3(d*15.0)*0.15;
+  col+=vec3(0.42,0.48,0.7)*band*nz*nz*0.5;
+  col+=vec3(0.012,0.014,0.022);
+  return col;
+}
+
+// ---------- accretion disk ----------
+// r: hit radius, p: world position of the hit, bz: L_z/E of the *incoming* photon (sign: disk rotates +y),
+// gcam: 1/sqrt(1-2/r0), the camera's own gravitational blueshift.
+vec4 disk(float r, vec3 p, float bz, float gcam){
+  float Om=pow(r,-1.5);                          // Keplerian angular velocity (coordinate time)
+  float g=1.0;
+  if(uRel>0.5) g=sqrt(1.0-3.0/r)/(1.0-Om*bz)*gcam;   // combined gravitational + Doppler shift for a circular emitter
+  float x=uDiskIn/r;
+  float Tn=pow(x,0.75)*pow(max(1.0-sqrt(x),0.0),0.25)*uTpeak;   // thin-disk T(r) ~ r^-3/4 (1-sqrt(rin/r))^1/4, peak = 1
+  float T=uTmax*Tn;
+  // turbulent texture co-rotating with the local Keplerian flow; two crossfaded layers bound the shear
+  float phi=atan(p.z,p.x);
+  float per=40.0, t1=mod(uTime,per), t2=mod(uTime+0.5*per,per), w=abs(t1/per*2.0-1.0);
+  float a1=phi-Om*t1, a2=phi-Om*t2;
+  float lr=log(r)*5.0;
+  vec2 q1=vec2(a1*(24.0/(2.0*PI)),lr), q2=vec2(a2*(24.0/(2.0*PI)),lr+13.0);
+  float n1=pnoise(q1,24.0)*0.5+pnoise(q1*2.0+vec2(0.0,7.3),48.0)*0.3+pnoise(q1*4.0+vec2(0.0,3.1),96.0)*0.2;
+  float n2=pnoise(q2,24.0)*0.5+pnoise(q2*2.0+vec2(0.0,7.3),48.0)*0.3+pnoise(q2*4.0+vec2(0.0,3.1),96.0)*0.2;
+  float n=mix(n1,n2,w);
+  float tex=mix(0.45,1.55,n);
+  vec3 col=planck(g*T)*tex;
+  float alpha=smoothstep(uDiskOut,uDiskOut-6.0,r)*smoothstep(uDiskIn,uDiskIn+0.15,r);
+  alpha*=smoothstep(0.0,0.6,alpha+n*0.8);
+  return vec4(col,alpha);
+}
+
+float hermite(float p0,float m0,float p1,float m1,float s){
+  float s2=s*s,s3=s2*s;
+  return (2.0*s3-3.0*s2+1.0)*p0+(s3-2.0*s2+s)*m0+(-2.0*s3+3.0*s2)*p1+(s3-s2)*m1;
+}
+
+// ---------- geodesic tracer ----------
+// The photon orbit lies in the plane spanned by the camera position (e1) and the ray direction.
+// In that plane we integrate the exact Schwarzschild orbit equation for u = 1/r as a function of the
+// azimuth phi:  u'' = -u + 3 M u^2   (M = 1).  RK4 in phi, adaptive step.
+vec3 trace(vec3 d){
+  float r0=length(uCam);
+  vec3 e1=uCam/r0;
+  float vr=dot(d,e1);
+  vec3 tv=d-vr*e1;
+  float vt=length(tv);
+  vec3 e2;
+  if(vt<1e-4){ vec3 ax=abs(e1.y)<0.9?vec3(0,1,0):vec3(1,0,0); e2=normalize(cross(e1,ax)); vt=1e-4; }
+  else e2=tv/vt;
+  // static observer tetrad at r0: proper radial distance factor sqrt(1-2/r0) enters du/dphi
+  float u=1.0/r0;
+  float f0=sqrt(1.0-2.0*u);
+  float du=-u*(vr/vt)*f0;
+  float b=r0*vt/f0;                          // impact parameter |L|/E
+  // Angular momentum of the traced (outgoing) ray is along e1 x e2; the physical photon runs the
+  // path backwards, so its L is reversed.
+  float bz=-b*cross(e1,e2).y;
+  float gcam=1.0/f0;
+  float phi=0.0;
+  float yA=e1.y;                              // sign of height above the disk plane, r * (cos phi e1 + sin phi e2).y
+  vec3 acc=vec3(0.0); float tr=1.0;
+  bool esc=false;
+  for(int i=0;i<uMaxSteps;i++){
+    float h=0.04+0.1*clamp(1.0-u*8.0,0.0,1.0);
+    float k1u=du,            k1d=-u+3.0*u*u;
+    float u2=u+0.5*h*k1u,    d2=du+0.5*h*k1d;
+    float k2u=d2,            k2d=-u2+3.0*u2*u2;
+    float u3=u+0.5*h*k2u,    d3=du+0.5*h*k2d;
+    float k3u=d3,            k3d=-u3+3.0*u3*u3;
+    float u4=u+h*k3u,        d4=du+h*k3d;
+    float k4u=d4,            k4d=-u4+3.0*u4*u4;
+    float un=u+h/6.0*(k1u+2.0*k2u+2.0*k3u+k4u);
+    float dn=du+h/6.0*(k1d+2.0*k2d+2.0*k3d+k4d);
+    float phn=phi+h;
+    float yB=cos(phn)*e1.y+sin(phn)*e2.y;
+    if(uDiskOn>0.5 && yA*yB<0.0){
+      // exact azimuth of the plane crossing, then Hermite-interpolate u there
+      float phc=atan(-e1.y,e2.y);
+      phc=phi+mod(phc-phi,PI);
+      float s=(phc-phi)/h;
+      float uc=hermite(u,du*h,un,dn*h,s);
+      if(uc>0.0){
+        float rc=1.0/uc;
+        if(rc>=uDiskIn&&rc<=uDiskOut){
+          vec3 p=rc*(cos(phc)*e1+sin(phc)*e2);
+          vec4 dc=disk(rc,p,bz,gcam);
+          acc+=tr*dc.rgb*dc.a; tr*=1.0-dc.a;
+          if(tr<0.01) return acc;
+        }
+      }
+    }
+    u=un; du=dn; phi=phn; yA=yB;
+    if(u>0.5) return acc;                     // crossed the horizon r = 2M
+    if(u<0.005 && du<0.0){ esc=true; break; } // r > 200M and receding
+  }
+  if(!esc) return acc;                        // stuck near the photon sphere: treat as captured
+  // asymptotic direction = tangent of the orbit
+  vec3 dir=normalize(-du*(cos(phi)*e1+sin(phi)*e2)+u*(-sin(phi)*e1+cos(phi)*e2));
+  return acc+tr*stars(dir);
+}
+
+vec3 aces(vec3 x){return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14),0.0,1.0);}
+
+void main(){
+  vec2 px=(gl_FragCoord.xy-0.5*uRes)/uRes.y*2.0;
+  vec3 d=normalize(uBasis*vec3(px,uFocal));
+  vec3 col=trace(d);
+  col=aces(col*1.3);
+  O=vec4(pow(col,vec3(1.0/2.2)),1.0);
+}`;
+
+function compile(type, src){
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+gl.bindVertexArray(gl.createVertexArray());
+const U = {};
+for (const n of ['uRes','uCam','uBasis','uFocal','uTime','uMaxSteps','uDiskOn','uRel','uDiskIn','uDiskOut','uTpeak','uTmax'])
+  U[n] = gl.getUniformLocation(prog, n);
+
+// ---------- camera / interaction ----------
+const R_MIN = 2.5, R_MAX = 80;
+let yaw = 0.6, pitch = 0.1, dist = 38;           // pitch: elevation above the disk plane
+let dragging = false, lastX = 0, lastY = 0;
+const pointers = new Map(); let pinchDist = 0;
+canvas.addEventListener('pointerdown', e => {
+  canvas.setPointerCapture(e.pointerId); pointers.set(e.pointerId, [e.clientX, e.clientY]);
+  if (pointers.size === 1) { dragging = true; lastX = e.clientX; lastY = e.clientY; canvas.classList.add('drag'); }
+  else if (pointers.size === 2) { const p = [...pointers.values()]; pinchDist = Math.hypot(p[0][0]-p[1][0], p[0][1]-p[1][1]); }
+});
+canvas.addEventListener('pointermove', e => {
+  if (!pointers.has(e.pointerId)) return;
+  pointers.set(e.pointerId, [e.clientX, e.clientY]);
+  if (pointers.size === 2) {
+    const p = [...pointers.values()]; const dd = Math.hypot(p[0][0]-p[1][0], p[0][1]-p[1][1]);
+    if (pinchDist > 0) dist = Math.min(R_MAX, Math.max(R_MIN, dist * pinchDist / dd));
+    pinchDist = dd; return;
+  }
+  if (!dragging) return;
+  yaw   -= (e.clientX - lastX) * 0.005;
+  pitch += (e.clientY - lastY) * 0.005;
+  pitch = Math.max(-1.55, Math.min(1.55, pitch));
+  lastX = e.clientX; lastY = e.clientY;
+});
+const endPointer = e => { pointers.delete(e.pointerId); if (pointers.size < 2) pinchDist = 0; if (pointers.size === 0) { dragging = false; canvas.classList.remove('drag'); } };
+canvas.addEventListener('pointerup', endPointer); canvas.addEventListener('pointercancel', endPointer);
+canvas.addEventListener('wheel', e => { e.preventDefault(); dist = Math.min(R_MAX, Math.max(R_MIN, dist * Math.exp(e.deltaY * 0.0012))); }, {passive:false});
+
+// ---------- settings ----------
+const diskBox = document.getElementById('disk'), relBox = document.getElementById('rel'), qSel = document.getElementById('q');
+const QUALITY = [{steps:220, maxScale:0.7}, {steps:360, maxScale:1.0}, {steps:600, maxScale:Math.min(devicePixelRatio||1, 2)}];
+const DISK_IN = 6.0, DISK_OUT = 20.0, T_MAX = 6500;
+const T_PEAK = 1 / (Math.pow(36/49, 0.75) * Math.pow(1/7, 0.25));   // normalises the T(r) profile to 1 at its maximum
+
+// ---------- render loop with adaptive resolution ----------
+let scale = 0.85, ema = 16, frames = 0, t0 = performance.now(), lastT = t0, fpsAcc = 0, fpsN = 0;
+const stats = document.getElementById('stats');
+function resize(){
+  const q = QUALITY[qSel.value|0];
+  scale = Math.min(scale, q.maxScale);
+  const w = Math.max(1, Math.round(innerWidth * scale)), h = Math.max(1, Math.round(innerHeight * scale));
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; gl.viewport(0, 0, w, h); }
+}
+function frame(now){
+  const dt = now - lastT; lastT = now;
+  ema = ema * 0.9 + Math.min(dt, 100) * 0.1;
+  const q = QUALITY[qSel.value|0];
+  if (++frames % 20 === 0) {                       // keep ~60 fps by trading resolution
+    if (ema > 19 && scale > 0.3) scale *= 0.88;
+    else if (ema < 13 && scale < q.maxScale) scale = Math.min(q.maxScale, scale * 1.06);
+  }
+  resize();
+  const cp = Math.cos(pitch);
+  const cam = [dist * cp * Math.sin(yaw), dist * Math.sin(pitch), dist * cp * Math.cos(yaw)];
+  const fw = [-cam[0]/dist, -cam[1]/dist, -cam[2]/dist];
+  let rt = [fw[1]*0 - fw[2]*1, fw[2]*0 - fw[0]*0, fw[0]*1 - fw[1]*0];  // forward x (0,1,0)
+  let rl = Math.hypot(rt[0], rt[1], rt[2]); rt = rt.map(v => v / rl);
+  const up = [rt[1]*fw[2] - rt[2]*fw[1], rt[2]*fw[0] - rt[0]*fw[2], rt[0]*fw[1] - rt[1]*fw[0]];
+  gl.uniform2f(U.uRes, canvas.width, canvas.height);
+  gl.uniform3fv(U.uCam, cam);
+  gl.uniformMatrix3fv(U.uBasis, false, [...rt, ...up, ...fw]);
+  gl.uniform1f(U.uFocal, 1 / Math.tan(22.5 * Math.PI / 180));
+  gl.uniform1f(U.uTime, (now - t0) * 0.006);
+  gl.uniform1i(U.uMaxSteps, q.steps);
+  gl.uniform1f(U.uDiskOn, diskBox.checked ? 1 : 0);
+  gl.uniform1f(U.uRel, relBox.checked ? 1 : 0);
+  gl.uniform1f(U.uDiskIn, DISK_IN); gl.uniform1f(U.uDiskOut, DISK_OUT);
+  gl.uniform1f(U.uTpeak, T_PEAK); gl.uniform1f(U.uTmax, T_MAX);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  fpsAcc += dt; if (++fpsN >= 30) {
+    stats.textContent = `${(1000 * fpsN / fpsAcc).toFixed(0)} fps · ${canvas.width}×${canvas.height} · r = ${dist.toFixed(1)} M · ${q.steps} max steps`;
+    fpsAcc = 0; fpsN = 0;
+  }
+  requestAnimationFrame(frame);
+}
+addEventListener('resize', resize);
+resize();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

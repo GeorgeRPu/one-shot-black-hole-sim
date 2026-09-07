@@ -1,0 +1,16 @@
+{
+  "ignorePaths": ["fable5/**", "opus4.8/**", "sonnet5/**", "opus4.6/**"],
+  "permissions": {
+    "deny": [
+      "Read(fable5/**)",
+      "Read(opus4.8/**)",
+      "Read(sonnet5/**)",
+      "Read(opus4.6/**)",
+      "Bash(cat *fable5/*)",
+      "Bash(cat *opus4.8/*)",
+      "Bash(cat *sonnet5/*)",
+      "Bash(cat *opus4.6/*)"
+    ]
+  },
+  "autoMemoryEnabled": false
+}

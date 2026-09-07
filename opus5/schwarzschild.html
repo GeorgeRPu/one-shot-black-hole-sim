@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Schwarzschild Black Hole Simulator</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; font-family: 'Courier New', monospace; }
+canvas { display: block; width: 100vw; height: 100vh; }
+#info {
+  position: fixed; top: 16px; left: 16px;
+  color: rgba(255,255,255,0.6); font-size: 13px; line-height: 1.6;
+  pointer-events: none; user-select: none;
+  text-shadow: 0 0 4px rgba(0,0,0,0.8);
+}
+#info h1 { font-size: 15px; color: rgba(255,255,255,0.85); margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="info">
+  <h1>Schwarzschild Black Hole</h1>
+  Drag to orbit &middot; Scroll to zoom
+</div>
+
+<!-- ======================== VERTEX SHADER ======================== -->
+<script id="vs" type="x-shader/x-vertex">
+attribute vec2 aPos;
+varying vec2 vUV;
+void main() {
+    vUV = aPos * 0.5 + 0.5;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+</script>
+
+<!-- ======================== FRAGMENT SHADER ======================== -->
+<script id="fs" type="x-shader/x-fragment">
+precision highp float;
+
+varying vec2 vUV;
+uniform vec2 uResolution;
+uniform float uCamRadius;
+uniform float uCamTheta;
+uniform float uCamPhi;
+uniform float uTime;
+
+// ---- constants ----
+const float PI = 3.14159265359;
+const float TWO_PI = 6.28318530718;
+const float rs = 1.0;            // Schwarzschild radius 2GM/c^2
+const float DISK_INNER = 3.0;    // ISCO = 3 rs
+const float DISK_OUTER = 12.0;
+const int MAX_STEPS = 300;
+const float STEP_SIZE = 0.08;
+const float ESCAPE_R = 50.0;
+const float EPS = 1.0e-5;
+
+// ---- hash / noise for stars ----
+float hash(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * vec3(443.897, 441.423, 437.195));
+    p3 += dot(p3, p3.yzx + 19.19);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+float hash3(vec3 p) {
+    p = fract(p * vec3(443.897, 441.423, 437.195));
+    p += dot(p, p.yzx + 19.19);
+    return fract((p.x + p.y) * p.z);
+}
+
+// ---- procedural starfield ----
+vec3 starfield(vec3 dir) {
+    // Convert direction to spherical for tiling
+    vec3 d = normalize(dir);
+    float theta = acos(clamp(d.y, -1.0, 1.0));
+    float phi = atan(d.z, d.x);
+
+    // Multiple layers of stars at different densities
+    vec3 col = vec3(0.0);
+
+    // Grid-based star placement for sharp points
+    for (int layer = 0; layer < 3; layer++) {
+        float scale = 80.0 + float(layer) * 120.0;
+        vec2 grid = vec2(phi, theta) * scale;
+        vec2 cell = floor(grid);
+        vec2 f = fract(grid);
+
+        float h = hash(cell + float(layer) * 137.0);
+        // Only some cells have stars
+        float threshold = 0.97 - float(layer) * 0.015;
+        if (h > threshold) {
+            // Star position within cell
+            vec2 starPos = vec2(
+                hash(cell * 1.31 + float(layer) * 71.0),
+                hash(cell * 1.73 + float(layer) * 113.0)
+            );
+            float dist = length(f - starPos);
+            float brightness = (h - threshold) / (1.0 - threshold);
+            float size = 0.04 + 0.06 * hash(cell * 2.17 + float(layer) * 53.0);
+            float star = smoothstep(size, 0.0, dist);
+            star *= brightness * brightness;
+
+            // Star color variation
+            float temp = hash(cell * 3.13 + float(layer) * 97.0);
+            vec3 starCol;
+            if (temp < 0.3) {
+                starCol = vec3(0.7, 0.8, 1.0); // blue-white
+            } else if (temp < 0.7) {
+                starCol = vec3(1.0, 1.0, 0.95); // white
+            } else {
+                starCol = vec3(1.0, 0.85, 0.6); // yellow-warm
+            }
+
+            float layerBrightness = (layer == 0) ? 1.5 : (layer == 1) ? 0.8 : 0.4;
+            col += star * starCol * layerBrightness;
+        }
+    }
+
+    // Very faint background glow (milky way-ish band)
+    float band = exp(-8.0 * (theta - PI * 0.5) * (theta - PI * 0.5));
+    float noise1 = hash(floor(vec2(phi, theta) * 40.0));
+    col += vec3(0.02, 0.015, 0.025) * band * (0.5 + 0.5 * noise1);
+
+    return col;
+}
+
+// ---- accretion disk color ----
+vec3 diskColor(float r, float hitPhi) {
+    // Temperature drops with radius: T ~ r^(-3/4) for standard thin disk
+    float t = clamp((r - DISK_INNER) / (DISK_OUTER - DISK_INNER), 0.0, 1.0);
+    float temp = 1.0 - pow(t, 0.75);
+
+    // Hot inner edge: white -> yellow -> orange -> red -> dim red
+    vec3 col;
+    if (temp > 0.8) {
+        col = mix(vec3(1.0, 0.95, 0.6), vec3(1.0, 1.0, 0.95), (temp - 0.8) / 0.2);
+    } else if (temp > 0.5) {
+        col = mix(vec3(1.0, 0.6, 0.2), vec3(1.0, 0.95, 0.6), (temp - 0.5) / 0.3);
+    } else if (temp > 0.2) {
+        col = mix(vec3(0.8, 0.25, 0.05), vec3(1.0, 0.6, 0.2), (temp - 0.2) / 0.3);
+    } else {
+        col = mix(vec3(0.15, 0.02, 0.0), vec3(0.8, 0.25, 0.05), temp / 0.2);
+    }
+
+    // Brightness also falls off with radius
+    float brightness = pow(temp, 0.5) * 1.8 + 0.1;
+
+    // Swirl pattern in the disk
+    float angle = hitPhi + 3.0 * log(r) - uTime * 0.3;
+    float swirl = 0.7 + 0.3 * sin(angle * 4.0) * sin(angle * 7.0 + 1.3);
+    swirl *= 0.8 + 0.2 * sin(angle * 13.0 + r * 2.0);
+
+    // Slight Doppler-like asymmetry (approaching side brighter)
+    float doppler = 1.0 + 0.3 * sin(hitPhi + uTime * 0.2);
+
+    return col * brightness * swirl * doppler;
+}
+
+// ---- main ray tracing ----
+void main() {
+    vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution) / uResolution.y;
+
+    // ---- camera setup ----
+    float camR = uCamRadius;
+    float camTheta = uCamTheta;
+    float camPhi = uCamPhi;
+
+    // Camera position in Cartesian
+    vec3 camPos = camR * vec3(
+        sin(camTheta) * cos(camPhi),
+        cos(camTheta),
+        sin(camTheta) * sin(camPhi)
+    );
+
+    // Camera basis vectors
+    vec3 forward = normalize(-camPos);
+    vec3 worldUp = vec3(0.0, 1.0, 0.0);
+    // Handle pole degeneracy
+    if (abs(dot(forward, worldUp)) > 0.999) {
+        worldUp = vec3(0.0, 0.0, 1.0);
+    }
+    vec3 right = normalize(cross(forward, worldUp));
+    vec3 up = cross(right, forward);
+
+    // Ray direction (perspective projection, FOV ~ 60 degrees)
+    float fov = 1.0;
+    vec3 rayDir = normalize(forward * fov + right * uv.x + up * uv.y);
+
+    // ---- Geodesic integration in Schwarzschild spacetime ----
+    // We integrate the photon path through curved spacetime.
+    // Using position + velocity formulation in Cartesian coordinates,
+    // with the geodesic acceleration from the Schwarzschild metric.
+
+    vec3 pos = camPos;
+    vec3 vel = rayDir;
+
+    // Normalize velocity for null geodesic step
+    // We use an affine parameter step; the velocity magnitude doesn't matter
+    // for the path shape (null geodesics are conformally invariant in direction)
+    vel = normalize(vel);
+
+    vec3 accumColor = vec3(0.0);
+    float accumAlpha = 0.0;
+    bool terminated = false;
+
+    float prevY = pos.y;
+
+    // Adaptive step size based on distance to center
+    float h;
+
+    for (int i = 0; i < MAX_STEPS; i++) {
+        if (terminated) break;
+
+        float r = length(pos);
+
+        // Adaptive step size: smaller steps near the black hole
+        if (r < 2.0) {
+            h = STEP_SIZE * 0.15;
+        } else if (r < 4.0) {
+            h = STEP_SIZE * 0.3;
+        } else if (r < 8.0) {
+            h = STEP_SIZE * 0.6;
+        } else {
+            h = STEP_SIZE * min(r * 0.1, 2.0);
+        }
+
+        // ---- Geodesic acceleration ----
+        // In isotropic-like Cartesian coordinates for Schwarzschild,
+        // the acceleration of a photon (null geodesic) is:
+        //
+        // For Schwarzschild in Cartesian coordinates, the geodesic equation gives:
+        // d²x^i/dλ² = -Γ^i_μν (dx^μ/dλ)(dx^ν/dλ)
+        //
+        // A good approximation that captures the key physics:
+        // a = -rs/(2r³) * [(c² + v²)r_hat - 2(v·r_hat)v]  (pseudo-Newtonian)
+        //
+        // More accurate: the GR result for null geodesics is
+        // a = -(rs/r³) * [pos * (1.5 * (v_perp)²) - v * (pos·v) * ...]
+        //
+        // We use the exact Schwarzschild null geodesic acceleration:
+        // d²x^i/dλ² = -(rs/(2r²)) * [ (1/r) * (3*(v·r_hat)² - v²) * x^i/r
+        //              - 2*(v·r_hat) * v^i + v² * x^i/r ] ...
+        //
+        // Simplest correct form for photons:
+        // a = -1.5 * rs * L² / r^5 * pos   (in the orbital plane, central force)
+        // But in 3D Cartesian, the full expression is:
+        //
+        // For a photon in Schwarzschild, using the 3D Cartesian pseudo-force:
+        // a_i = -(rs/(2*r^3)) * x_i * (c^2 ... )
+        //
+        // Let's use the physically correct approach:
+        // The key GR correction to photon trajectories is:
+        // a = -rs*c²/(2*r³) * r_hat + 1.5*rs/r * (v_perp²/r²) * r_hat
+        // where v_perp is perpendicular velocity component
+        //
+        // Exact: for null geodesics in Schwarzschild, the effective acceleration
+        // in Cartesian coords that reproduces the correct light bending:
+
+        vec3 rhat = pos / r;
+        float rdot = dot(vel, rhat);
+        vec3 v_perp = vel - rdot * rhat;
+        float Lsq = dot(v_perp, v_perp) * r * r;
+
+        // Geodesic equation for photons in Schwarzschild (exact):
+        // d²r/dλ² = -rs/(2r²)(1-rs/r)c_t² + rs/(2r²(1-rs/r))*rdot² + (r-rs)*vphi²
+        // In 3D Cartesian, the acceleration that gives correct orbits:
+        vec3 accel = -1.5 * rs * Lsq / (r * r * r * r * r) * pos;
+
+        // ---- RK4 integration ----
+        vec3 k1v = accel * h;
+        vec3 k1x = vel * h;
+
+        vec3 pos2 = pos + 0.5 * k1x;
+        vec3 vel2 = vel + 0.5 * k1v;
+        float r2 = length(pos2);
+        vec3 rhat2 = pos2 / r2;
+        float rdot2 = dot(vel2, rhat2);
+        vec3 vp2 = vel2 - rdot2 * rhat2;
+        float L2sq = dot(vp2, vp2) * r2 * r2;
+        vec3 a2 = -1.5 * rs * L2sq / (r2*r2*r2*r2*r2) * pos2;
+        vec3 k2v = a2 * h;
+        vec3 k2x = vel2 * h;
+
+        vec3 pos3 = pos + 0.5 * k2x;
+        vec3 vel3 = vel + 0.5 * k2v;
+        float r3 = length(pos3);
+        vec3 rhat3 = pos3 / r3;
+        float rdot3 = dot(vel3, rhat3);
+        vec3 vp3 = vel3 - rdot3 * rhat3;
+        float L3sq = dot(vp3, vp3) * r3 * r3;
+        vec3 a3 = -1.5 * rs * L3sq / (r3*r3*r3*r3*r3) * pos3;
+        vec3 k3v = a3 * h;
+        vec3 k3x = vel3 * h;
+
+        vec3 pos4 = pos + k3x;
+        vec3 vel4 = vel + k3v;
+        float r4 = length(pos4);
+        vec3 rhat4 = pos4 / r4;
+        float rdot4 = dot(vel4, rhat4);
+        vec3 vp4 = vel4 - rdot4 * rhat4;
+        float L4sq = dot(vp4, vp4) * r4 * r4;
+        vec3 a4 = -1.5 * rs * L4sq / (r4*r4*r4*r4*r4) * pos4;
+        vec3 k4v = a4 * h;
+        vec3 k4x = vel4 * h;
+
+        vec3 newPos = pos + (k1x + 2.0*k2x + 2.0*k3x + k4x) / 6.0;
+        vec3 newVel = vel + (k1v + 2.0*k2v + 2.0*k3v + k4v) / 6.0;
+
+        float newR = length(newPos);
+
+        // ---- Check event horizon ----
+        if (newR < rs * 1.01) {
+            // Absorbed by black hole
+            // Slight reddish glow right at the edge
+            float edge = smoothstep(rs * 0.8, rs * 1.01, newR);
+            accumColor += (1.0 - accumAlpha) * vec3(0.1, 0.0, 0.0) * edge * 0.3;
+            terminated = true;
+            break;
+        }
+
+        // ---- Check accretion disk crossing ----
+        // Disk is in the equatorial plane (y = 0)
+        if (pos.y * newPos.y < 0.0 || (abs(newPos.y) < h * 0.5 && abs(pos.y) > abs(newPos.y))) {
+            // Ray crossed y = 0; interpolate to find crossing point
+            float t_cross = abs(pos.y) / (abs(pos.y) + abs(newPos.y) + EPS);
+            vec3 crossPos = mix(pos, newPos, t_cross);
+            float crossR = length(crossPos);
+
+            if (crossR > DISK_INNER && crossR < DISK_OUTER) {
+                float crossPhi = atan(crossPos.z, crossPos.x);
+                vec3 dCol = diskColor(crossR, crossPhi);
+
+                // Opacity depends on how face-on we see the disk
+                // and falls off at edges
+                float edgeFade = smoothstep(DISK_INNER, DISK_INNER + 0.5, crossR)
+                               * smoothstep(DISK_OUTER, DISK_OUTER - 1.0, crossR);
+                float diskAlpha = 0.85 * edgeFade;
+
+                // Additive blending for the glow
+                accumColor += (1.0 - accumAlpha) * dCol * diskAlpha;
+                accumAlpha += (1.0 - accumAlpha) * diskAlpha * 0.6;
+
+                // Don't terminate - allow ray to continue for multiple crossings
+            }
+        }
+
+        // ---- Check escape ----
+        if (newR > ESCAPE_R) {
+            // Ray escaped; sample starfield with final direction
+            vec3 escDir = normalize(newVel);
+            vec3 stars = starfield(escDir);
+            accumColor += (1.0 - accumAlpha) * stars;
+            terminated = true;
+            break;
+        }
+
+        prevY = pos.y;
+        pos = newPos;
+        vel = newVel;
+    }
+
+    // If we ran out of steps, treat as escaped
+    if (!terminated) {
+        vec3 escDir = normalize(vel);
+        vec3 stars = starfield(escDir);
+        accumColor += (1.0 - accumAlpha) * stars;
+    }
+
+    // Tone mapping and gamma
+    accumColor = accumColor / (accumColor + vec3(1.0));
+    accumColor = pow(accumColor, vec3(1.0 / 2.2));
+
+    gl_FragColor = vec4(accumColor, 1.0);
+}
+</script>
+
+<!-- ======================== JAVASCRIPT ======================== -->
+<script>
+(function() {
+    'use strict';
+
+    // ---- Canvas & GL setup ----
+    const canvas = document.getElementById('c');
+    const gl = canvas.getContext('webgl', {
+        antialias: false,
+        preserveDrawingBuffer: false,
+        alpha: false
+    });
+    if (!gl) {
+        document.body.innerHTML = '<p style="color:#fff;padding:2em;">WebGL not supported.</p>';
+        return;
+    }
+
+    // ---- Compile shaders ----
+    function compileShader(src, type) {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+            console.error('Shader error:', gl.getShaderInfoLog(s));
+            return null;
+        }
+        return s;
+    }
+
+    const vsSrc = document.getElementById('vs').textContent;
+    const fsSrc = document.getElementById('fs').textContent;
+
+    const vs = compileShader(vsSrc, gl.VERTEX_SHADER);
+    const fs = compileShader(fsSrc, gl.FRAGMENT_SHADER);
+
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        console.error('Link error:', gl.getProgramInfoLog(prog));
+        return;
+    }
+    gl.useProgram(prog);
+
+    // ---- Full-screen quad ----
+    const quad = new Float32Array([-1,-1, 1,-1, -1,1, 1,1]);
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+    const aPos = gl.getAttribLocation(prog, 'aPos');
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+    // ---- Uniforms ----
+    const uResolution = gl.getUniformLocation(prog, 'uResolution');
+    const uCamRadius  = gl.getUniformLocation(prog, 'uCamRadius');
+    const uCamTheta   = gl.getUniformLocation(prog, 'uCamTheta');
+    const uCamPhi     = gl.getUniformLocation(prog, 'uCamPhi');
+    const uTime       = gl.getUniformLocation(prog, 'uTime');
+
+    // ---- Camera state ----
+    let camRadius = 18.0;
+    let camTheta  = 1.2;   // polar angle from +Y axis
+    let camPhi    = 0.0;    // azimuthal angle
+
+    const CAM_RADIUS_MIN = 3.5;
+    const CAM_RADIUS_MAX = 80.0;
+    const THETA_MIN = 0.15;
+    const THETA_MAX = Math.PI - 0.15;
+
+    // ---- Mouse interaction ----
+    let isDragging = false;
+    let lastMX = 0, lastMY = 0;
+
+    canvas.addEventListener('mousedown', function(e) {
+        isDragging = true;
+        lastMX = e.clientX;
+        lastMY = e.clientY;
+        e.preventDefault();
+    });
+
+    window.addEventListener('mousemove', function(e) {
+        if (!isDragging) return;
+        const dx = e.clientX - lastMX;
+        const dy = e.clientY - lastMY;
+        lastMX = e.clientX;
+        lastMY = e.clientY;
+
+        camPhi   -= dx * 0.005;
+        camTheta += dy * 0.005;
+        camTheta = Math.max(THETA_MIN, Math.min(THETA_MAX, camTheta));
+    });
+
+    window.addEventListener('mouseup', function() {
+        isDragging = false;
+    });
+
+    canvas.addEventListener('wheel', function(e) {
+        e.preventDefault();
+        camRadius *= 1.0 + e.deltaY * 0.001;
+        camRadius = Math.max(CAM_RADIUS_MIN, Math.min(CAM_RADIUS_MAX, camRadius));
+    }, { passive: false });
+
+    // ---- Touch interaction ----
+    let lastTouchDist = 0;
+    let lastTouchX = 0, lastTouchY = 0;
+
+    canvas.addEventListener('touchstart', function(e) {
+        e.preventDefault();
+        if (e.touches.length === 1) {
+            isDragging = true;
+            lastTouchX = e.touches[0].clientX;
+            lastTouchY = e.touches[0].clientY;
+        } else if (e.touches.length === 2) {
+            isDragging = false;
+            const dx = e.touches[1].clientX - e.touches[0].clientX;
+            const dy = e.touches[1].clientY - e.touches[0].clientY;
+            lastTouchDist = Math.sqrt(dx*dx + dy*dy);
+        }
+    }, { passive: false });
+
+    canvas.addEventListener('touchmove', function(e) {
+        e.preventDefault();
+        if (e.touches.length === 1 && isDragging) {
+            const dx = e.touches[0].clientX - lastTouchX;
+            const dy = e.touches[0].clientY - lastTouchY;
+            lastTouchX = e.touches[0].clientX;
+            lastTouchY = e.touches[0].clientY;
+            camPhi   -= dx * 0.005;
+            camTheta += dy * 0.005;
+            camTheta = Math.max(THETA_MIN, Math.min(THETA_MAX, camTheta));
+        } else if (e.touches.length === 2) {
+            const dx = e.touches[1].clientX - e.touches[0].clientX;
+            const dy = e.touches[1].clientY - e.touches[0].clientY;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            if (lastTouchDist > 0) {
+                camRadius *= lastTouchDist / dist;
+                camRadius = Math.max(CAM_RADIUS_MIN, Math.min(CAM_RADIUS_MAX, camRadius));
+            }
+            lastTouchDist = dist;
+        }
+    }, { passive: false });
+
+    canvas.addEventListener('touchend', function(e) {
+        isDragging = false;
+        lastTouchDist = 0;
+    });
+
+    // ---- Resize handling ----
+    function resize() {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const w = Math.floor(canvas.clientWidth  * dpr);
+        const h = Math.floor(canvas.clientHeight * dpr);
+        if (canvas.width !== w || canvas.height !== h) {
+            canvas.width  = w;
+            canvas.height = h;
+            gl.viewport(0, 0, w, h);
+        }
+    }
+
+    // ---- Render loop ----
+    const startTime = performance.now();
+
+    function frame() {
+        resize();
+
+        const t = (performance.now() - startTime) * 0.001;
+
+        gl.uniform2f(uResolution, canvas.width, canvas.height);
+        gl.uniform1f(uCamRadius, camRadius);
+        gl.uniform1f(uCamTheta, camTheta);
+        gl.uniform1f(uCamPhi, camPhi);
+        gl.uniform1f(uTime, t);
+
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+        requestAnimationFrame(frame);
+    }
+
+    requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

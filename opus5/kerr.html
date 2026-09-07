@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kerr Black Hole Simulator</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; font-family: 'Courier New', monospace; color: #ccc; }
+canvas { display: block; width: 100vw; height: 100vh; }
+#ui {
+  position: absolute; top: 16px; left: 16px;
+  background: rgba(0,0,0,0.7); border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 8px; padding: 16px; min-width: 260px;
+  backdrop-filter: blur(6px); user-select: none;
+}
+#ui h2 { font-size: 14px; color: #f0c040; margin-bottom: 10px; letter-spacing: 1px; }
+.ctrl { margin-bottom: 10px; }
+.ctrl label { display: block; font-size: 11px; color: #aaa; margin-bottom: 3px; }
+.ctrl input[type=range] {
+  -webkit-appearance: none; width: 100%; height: 6px;
+  background: #333; border-radius: 3px; outline: none;
+}
+.ctrl input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 14px; height: 14px;
+  background: #f0c040; border-radius: 50%; cursor: pointer;
+}
+.val { float: right; color: #f0c040; font-size: 11px; }
+#info {
+  position: absolute; bottom: 16px; left: 16px;
+  font-size: 11px; color: rgba(255,255,255,0.4);
+}
+#fps-counter {
+  position: absolute; top: 16px; right: 16px;
+  font-size: 12px; color: rgba(255,255,255,0.5);
+}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <h2>KERR BLACK HOLE</h2>
+  <div class="ctrl">
+    <label>Spin a/M <span class="val" id="spinVal">0.00</span></label>
+    <input type="range" id="spinSlider" min="0" max="0.998" step="0.001" value="0.0">
+  </div>
+  <div class="ctrl">
+    <label>Inclination <span class="val" id="incVal">80&#176;</span></label>
+    <input type="range" id="incSlider" min="5" max="175" step="1" value="80">
+  </div>
+  <div class="ctrl">
+    <label>Disk Outer Radius <span class="val" id="diskVal">12.0</span></label>
+    <input type="range" id="diskSlider" min="6" max="20" step="0.5" value="12">
+  </div>
+  <div class="ctrl">
+    <label>Integration Steps <span class="val" id="stepVal">200</span></label>
+    <input type="range" id="stepSlider" min="80" max="400" step="10" value="200">
+  </div>
+</div>
+<div id="info">Drag to orbit &middot; Scroll to zoom</div>
+<div id="fps-counter">-- fps</div>
+
+<script>
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl', { antialias: false, preserveDrawingBuffer: false });
+if (!gl) { document.body.innerHTML = '<h1 style="color:red;padding:40px">WebGL not supported</h1>'; }
+
+/* ---- state ---- */
+let spin = 0.0;
+let camDist = 18.0;
+let camTheta = 80.0 * Math.PI / 180.0;
+let camPhi = 0.0;
+let diskOuter = 12.0;
+let maxSteps = 200;
+let dragging = false, lastX = 0, lastY = 0;
+let frameCount = 0, lastFpsTime = performance.now();
+
+/* ---- UI ---- */
+document.getElementById('spinSlider').addEventListener('input', e => {
+  spin = parseFloat(e.target.value);
+  document.getElementById('spinVal').textContent = spin.toFixed(3);
+});
+document.getElementById('incSlider').addEventListener('input', e => {
+  camTheta = parseFloat(e.target.value) * Math.PI / 180.0;
+  document.getElementById('incVal').textContent = e.target.value + '°';
+});
+document.getElementById('diskSlider').addEventListener('input', e => {
+  diskOuter = parseFloat(e.target.value);
+  document.getElementById('diskVal').textContent = diskOuter.toFixed(1);
+});
+document.getElementById('stepSlider').addEventListener('input', e => {
+  maxSteps = parseInt(e.target.value);
+  document.getElementById('stepVal').textContent = maxSteps;
+});
+
+/* ---- mouse / touch ---- */
+canvas.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+window.addEventListener('mouseup', () => { dragging = false; });
+window.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  camPhi -= (e.clientX - lastX) * 0.005;
+  camTheta = Math.max(0.05, Math.min(Math.PI - 0.05, camTheta + (e.clientY - lastY) * 0.005));
+  lastX = e.clientX; lastY = e.clientY;
+});
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  camDist = Math.max(4.0, Math.min(80.0, camDist * (1.0 + e.deltaY * 0.001)));
+}, { passive: false });
+canvas.addEventListener('touchstart', e => {
+  if (e.touches.length === 1) { dragging = true; lastX = e.touches[0].clientX; lastY = e.touches[0].clientY; }
+  e.preventDefault();
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+  if (!dragging || e.touches.length !== 1) return;
+  camPhi -= (e.touches[0].clientX - lastX) * 0.005;
+  camTheta = Math.max(0.05, Math.min(Math.PI - 0.05, camTheta + (e.touches[0].clientY - lastY) * 0.005));
+  lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
+  e.preventDefault();
+}, { passive: false });
+canvas.addEventListener('touchend', () => { dragging = false; });
+
+/* ---- shaders ---- */
+const vsSource = `
+attribute vec2 aPos;
+varying vec2 vUV;
+void main() {
+  vUV = aPos * 0.5 + 0.5;
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}`;
+
+const fsSource = `
+precision highp float;
+varying vec2 vUV;
+
+uniform vec2 uResolution;
+uniform float uSpin;
+uniform float uCamDist;
+uniform float uCamTheta;
+uniform float uCamPhi;
+uniform float uDiskOuter;
+uniform int uMaxSteps;
+uniform float uTime;
+
+#define PI 3.141592653589793
+#define M_BH 0.5
+#define TWO_M 1.0
+
+// ---- Procedural starfield ----
+float hash3(vec3 p) {
+  p = fract(p * vec3(443.8975, 397.2973, 491.1871));
+  p += dot(p, p.yzx + 19.19);
+  return fract((p.x + p.y) * p.z);
+}
+
+float starField(vec3 dir) {
+  vec3 d = normalize(dir);
+  float stars = 0.0;
+  // Coarse bright stars
+  vec3 cell = floor(d * 80.0);
+  float h = hash3(cell);
+  if (h > 0.985) {
+    float dist = length(d - normalize(cell + 0.5) / 80.0) * 80.0;
+    // wrong normalization on purpose: (cell+0.5)/80 != normalize((cell+0.5)/80)
+    // use correct form:
+    dist = length(d - normalize((cell + 0.5) / 80.0)) * 80.0;
+    stars += smoothstep(0.8, 0.0, dist) * (0.5 + 0.5 * hash3(cell + 100.0));
+  }
+  // Medium stars
+  cell = floor(d * 200.0);
+  h = hash3(cell + 7.0);
+  if (h > 0.992) {
+    float dist = length(d - normalize((cell + 0.5) / 200.0)) * 200.0;
+    stars += smoothstep(0.6, 0.0, dist) * (0.3 + 0.3 * hash3(cell + 200.0));
+  }
+  // Faint stars
+  cell = floor(d * 500.0);
+  h = hash3(cell + 13.0);
+  if (h > 0.996) {
+    float dist = length(d - normalize((cell + 0.5) / 500.0)) * 500.0;
+    stars += smoothstep(0.5, 0.0, dist) * 0.2;
+  }
+  return stars;
+}
+
+// ---- Kerr metric quantities ----
+// Boyer-Lindquist coordinates (r, theta, phi). M_BH = 0.5, rs = 2M = 1.
+// Sigma = r^2 + a^2 cos^2(theta)
+// Delta = r^2 - 2M r + a^2
+
+float eventHorizon(float a) {
+  return M_BH + sqrt(M_BH * M_BH - a * a);
+}
+
+// Prograde ISCO radius for Kerr (Bardeen, Press, Teukolsky 1972)
+float iscoRadius(float a) {
+  float chi = a / M_BH; // dimensionless spin
+  float z1 = 1.0 + pow(1.0 - chi * chi, 1.0 / 3.0)
+            * (pow(1.0 + chi, 1.0 / 3.0) + pow(max(1.0 - chi, 0.0), 1.0 / 3.0));
+  float z2 = sqrt(3.0 * chi * chi + z1 * z1);
+  return M_BH * (3.0 + z2 - sqrt((3.0 - z1) * (3.0 + z1 + 2.0 * z2)));
+}
+
+// Approximate blackbody color
+vec3 blackBodyApprox(float T) {
+  vec3 cool = vec3(0.8, 0.15, 0.02);
+  vec3 warm = vec3(1.0, 0.6, 0.1);
+  vec3 hot  = vec3(1.0, 0.95, 0.8);
+  vec3 vhot = vec3(0.7, 0.85, 1.0);
+  if (T < 0.33) return mix(cool, warm, T / 0.33);
+  if (T < 0.66) return mix(warm, hot, (T - 0.33) / 0.33);
+  return mix(hot, vhot, (T - 0.66) / 0.34);
+}
+
+// ---- Geodesic equations of motion ----
+// Hamiltonian: H = (1/2) g^{mu nu} p_mu p_nu = 0 (null geodesics)
+// Conserved: p_t = -E, p_phi = L. Dynamical: r, theta, p_r, p_theta.
+//
+// Hamilton's equations:
+//   dx^mu/dl = dH/dp_mu = g^{mu nu} p_nu
+//   dp_mu/dl = -dH/dx^mu = -(1/2)(dg^{ab}/dx^mu) p_a p_b
+//
+// Contravariant Kerr metric components:
+//   g^{tt} = -A/(Sigma Delta),  A = (r^2+a^2)^2 - Delta a^2 sin^2(theta)
+//   g^{t phi} = -2M r a / (Sigma Delta)
+//   g^{rr} = Delta / Sigma
+//   g^{theta theta} = 1 / Sigma
+//   g^{phi phi} = (Delta - a^2 sin^2 theta) / (Sigma Delta sin^2 theta)
+
+void geodesicDerivs(
+  float r, float th, float pr, float pth,
+  float a, float E, float L,
+  out float dr, out float dth, out float dphi,
+  out float dpr, out float dpth
+) {
+  float sth = sin(th);
+  float cth = cos(th);
+  float sth2 = sth * sth;
+  float cth2 = cth * cth;
+  float r2 = r * r;
+  float a2 = a * a;
+
+  float sig = r2 + a2 * cth2;
+  float del = r2 - TWO_M * r + a2;
+  float sig2 = sig * sig;
+  float invSig = 1.0 / sig;
+
+  // P = (r^2 + a^2) E - a L  (frequently used combination)
+  float P = (r2 + a2) * E - a * L;
+
+  // --- Coordinate velocities from Hamilton's eqs ---
+  dr = del * pr * invSig;
+  dth = pth * invSig;
+
+  // dphi/dl = [a P/Delta + L/sin^2(theta) - a E] / Sigma
+  float LoverSth2 = (sth2 > 1.0e-10) ? L / sth2 : L * 1.0e10;
+  dphi = (a * P / del + LoverSth2 - a * E) * invSig;
+
+  // --- Momentum derivatives: dp_mu/dl = -(1/2)(dg^{ab}/dx^mu) p_a p_b ---
+  // We need partial derivatives of all g^{ab} w.r.t. r and theta.
+
+  // Intermediate quantities
+  float dSig_dr = 2.0 * r;
+  float dDel_dr = 2.0 * r - TWO_M;
+  float A = (r2 + a2) * (r2 + a2) - del * a2 * sth2;
+  float dA_dr = 4.0 * r * (r2 + a2) - dDel_dr * a2 * sth2;
+  float B = TWO_M * r * a;  // numerator of g^{t phi}
+
+  // d(g^{tt})/dr = d(-A/(sig*del))/dr
+  float sd = sig * del;
+  float sd2 = sd * sd;
+  float dgtt_dr = -(dA_dr * sd - A * (dSig_dr * del + sig * dDel_dr)) / sd2;
+
+  // d(g^{t phi})/dr = d(-B/(sig*del))/dr
+  float dgtphi_dr = -(TWO_M * a * sd - B * (dSig_dr * del + sig * dDel_dr)) / sd2;
+
+  // d(g^{rr})/dr = d(del/sig)/dr
+  float dgrr_dr = (dDel_dr * sig - del * dSig_dr) / sig2;
+
+  // d(g^{thth})/dr = d(1/sig)/dr
+  float dgthth_dr = -dSig_dr / sig2;
+
+  // d(g^{phph})/dr: numerator = del - a2*sth2, denominator = sig*del*sth2
+  float Cn = del - a2 * sth2;
+  float Cd = sig * del * sth2;
+  float dgphph_dr = (dDel_dr * Cd - Cn * (dSig_dr * del + sig * dDel_dr) * sth2) / (Cd * Cd);
+
+  // dp_r/dl = -(1/2)[dg^{tt}/dr E^2 - 2 dg^{tphi}/dr E L + dg^{rr}/dr pr^2
+  //                   + dg^{thth}/dr pth^2 + dg^{phph}/dr L^2]
+  dpr = -0.5 * (dgtt_dr * E * E - 2.0 * dgtphi_dr * E * L
+              + dgrr_dr * pr * pr + dgthth_dr * pth * pth + dgphph_dr * L * L);
+
+  // --- dp_theta/dl: partial derivatives w.r.t. theta ---
+  float dSig_dth = -2.0 * a2 * cth * sth;
+  float dsth2_dth = 2.0 * sth * cth;
+  float dA_dth = -del * a2 * dsth2_dth;
+
+  float dgtt_dth = -(dA_dth * sig - A * dSig_dth) / (sig2 * del);
+  float dgtphi_dth = B * dSig_dth / (sig2 * del);
+  float dgrr_dth = -del * dSig_dth / sig2;
+  float dgthth_dth = -dSig_dth / sig2;
+
+  float dCn_dth = -a2 * dsth2_dth;
+  float Cd_th = sig * del * sth2;
+  float dCd_dth = dSig_dth * del * sth2 + sig * del * dsth2_dth;
+  float dgphph_dth = (dCn_dth * Cd_th - Cn * dCd_dth) / (Cd_th * Cd_th);
+
+  dpth = -0.5 * (dgtt_dth * E * E - 2.0 * dgtphi_dth * E * L
+               + dgrr_dth * pr * pr + dgthth_dth * pth * pth + dgphph_dth * L * L);
+}
+
+void main() {
+  vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution) / min(uResolution.x, uResolution.y);
+
+  float a = uSpin * M_BH; // spin parameter in geometric units
+  float rCam = uCamDist;
+  float thCam = uCamTheta;
+  float phCam = uCamPhi;
+
+  float sth = sin(thCam);
+  float cth = cos(thCam);
+  float r2 = rCam * rCam;
+  float a2 = a * a;
+  float sig = r2 + a2 * cth * cth;
+  float del = r2 - TWO_M * rCam + a2;
+  float rh = eventHorizon(a);
+
+  // Camera local frame direction (forward = -r, up = -theta, right = +phi)
+  float fov = 1.0;
+  vec3 localDir = normalize(vec3(uv.x * fov, uv.y * fov, -1.0));
+
+  // ---- ZAMO (locally non-rotating) tetrad at camera position ----
+  // A = (r^2+a^2)^2 - Delta a^2 sin^2(theta)
+  float bigA = (r2 + a2) * (r2 + a2) - del * a2 * sth * sth;
+  float omega_zamo = TWO_M * rCam * a / bigA; // ZAMO angular velocity
+  float alpha = sqrt(del * sig / bigA);        // lapse function
+
+  // ZAMO tetrad vectors (coordinate components):
+  //   e_(0) = (1/alpha)(d/dt + omega d/dphi)
+  //   e_(1) = sqrt(Delta/Sigma) d/dr
+  //   e_(2) = (1/sqrt(Sigma)) d/dtheta
+  //   e_(3) = sqrt(Sigma/(A sin^2 theta)) d/dphi
+
+  // Photon coordinate 4-velocity: p^mu = e_(0) - z*e_(1) - y*e_(2) + x*e_(3)
+  float pt_coord = 1.0 / alpha;
+  float pr_coord = -localDir.z * sqrt(del / sig);
+  float pth_coord = -localDir.y / sqrt(sig);
+  float pphi_coord = localDir.x * sqrt(sig / (bigA * sth * sth)) + omega_zamo / alpha;
+
+  // Covariant metric components at camera
+  float g_tt = -(1.0 - TWO_M * rCam / sig);
+  float g_tphi = -TWO_M * rCam * a * sth * sth / sig;
+  float g_rr = sig / del;
+  float g_thth = sig;
+  float g_phph = (r2 + a2 + TWO_M * rCam * a2 * sth * sth / sig) * sth * sth;
+
+  // Conserved quantities
+  float E = -(g_tt * pt_coord + g_tphi * pphi_coord);    // energy
+  float L = g_tphi * pt_coord + g_phph * pphi_coord;     // angular momentum
+
+  // Covariant spatial momenta
+  float pr_cov = g_rr * pr_coord;
+  float pth_cov = g_thth * pth_coord;
+
+  // Carter constant: Q = p_theta^2 + cos^2(theta)[L^2/sin^2(theta) - a^2 E^2]
+  // (Not explicitly needed since we integrate full Hamilton eqs, but computed for reference)
+
+  // Disk boundaries
+  float r_isco = iscoRadius(a);
+  float r_diskOut = uDiskOuter * M_BH;
+
+  // ---- RK4 geodesic integration ----
+  float r_cur = rCam;
+  float th_cur = thCam;
+  float phi_cur = phCam;
+  float pr_cur = pr_cov;
+  float pth_cur = pth_cov;
+  float prev_th = th_cur;
+
+  vec3 color = vec3(0.0);
+  bool hitSomething = false;
+
+  for (int i = 0; i < 400; i++) {
+    if (i >= uMaxSteps) break;
+
+    // Adaptive step: smaller near horizon for accuracy
+    float rFactor = max(r_cur - rh, 0.1);
+    float h = clamp(0.04 * min(rFactor * 0.5, 2.0), 0.005, 0.15);
+
+    // RK4 stages
+    float dr1, dth1, dphi1, dpr1, dpth1;
+    float dr2, dth2, dphi2, dpr2, dpth2;
+    float dr3, dth3, dphi3, dpr3, dpth3;
+    float dr4, dth4, dphi4, dpr4, dpth4;
+
+    geodesicDerivs(r_cur, th_cur, pr_cur, pth_cur, a, E, L, dr1, dth1, dphi1, dpr1, dpth1);
+
+    float r2_ = r_cur + 0.5*h*dr1;
+    float th2_ = clamp(th_cur + 0.5*h*dth1, 0.001, PI - 0.001);
+    geodesicDerivs(r2_, th2_, pr_cur + 0.5*h*dpr1, pth_cur + 0.5*h*dpth1, a, E, L,
+                   dr2, dth2, dphi2, dpr2, dpth2);
+
+    float r3_ = r_cur + 0.5*h*dr2;
+    float th3_ = clamp(th_cur + 0.5*h*dth2, 0.001, PI - 0.001);
+    geodesicDerivs(r3_, th3_, pr_cur + 0.5*h*dpr2, pth_cur + 0.5*h*dpth2, a, E, L,
+                   dr3, dth3, dphi3, dpr3, dpth3);
+
+    float r4_ = r_cur + h*dr3;
+    float th4_ = clamp(th_cur + h*dth3, 0.001, PI - 0.001);
+    geodesicDerivs(r4_, th4_, pr_cur + h*dpr3, pth_cur + h*dpth3, a, E, L,
+                   dr4, dth4, dphi4, dpr4, dpth4);
+
+    prev_th = th_cur;
+    r_cur   += h * (dr1   + 2.0*dr2   + 2.0*dr3   + dr4)   / 6.0;
+    th_cur  += h * (dth1  + 2.0*dth2  + 2.0*dth3  + dth4)  / 6.0;
+    phi_cur += h * (dphi1 + 2.0*dphi2 + 2.0*dphi3 + dphi4) / 6.0;
+    pr_cur  += h * (dpr1  + 2.0*dpr2  + 2.0*dpr3  + dpr4)  / 6.0;
+    pth_cur += h * (dpth1 + 2.0*dpth2 + 2.0*dpth3 + dpth4) / 6.0;
+    th_cur = clamp(th_cur, 0.001, PI - 0.001);
+
+    // ---- Termination checks ----
+
+    // Event horizon capture
+    if (r_cur <= rh * 1.01) {
+      color = vec3(0.0);
+      hitSomething = true;
+      break;
+    }
+
+    // Escaped to infinity - sample starfield
+    if (r_cur > 50.0) {
+      vec3 pos = vec3(r_cur * sin(th_cur) * cos(phi_cur),
+                      r_cur * sin(th_cur) * sin(phi_cur),
+                      r_cur * cos(th_cur));
+      float s = starField(normalize(pos));
+      color = vec3(0.9, 0.95, 1.0) * s + vec3(0.003, 0.003, 0.008);
+      hitSomething = true;
+      break;
+    }
+
+    // Accretion disk crossing (equatorial plane, theta = pi/2)
+    if ((prev_th - PI * 0.5) * (th_cur - PI * 0.5) < 0.0) {
+      float rc = r_cur;
+      if (rc > r_isco && rc < r_diskOut) {
+        // ---- Disk emission model ----
+
+        // Keplerian orbital angular velocity (prograde)
+        float sqM = sqrt(M_BH);
+        float Omega_k = sqM / (pow(rc, 1.5) + a * sqM);
+
+        // Emitter 4-velocity normalization: u^t for circular equatorial orbit
+        // -g_{tt} - 2 g_{t phi} Omega - g_{phi phi} Omega^2 = 1/(u^t)^2
+        float sig_d = rc * rc; // Sigma at equator (cos theta = 0)
+        float g_tt_d = -(1.0 - TWO_M * rc / sig_d);
+        float g_tphi_d = -TWO_M * rc * a / sig_d;
+        float g_phph_d = rc * rc + a2 + TWO_M * rc * a2 / sig_d;
+        float inv_ut2 = -g_tt_d - 2.0 * g_tphi_d * Omega_k - g_phph_d * Omega_k * Omega_k;
+        float ut_emit = 1.0 / sqrt(max(inv_ut2, 1.0e-6));
+
+        // Frequency ratio g = E_obs/E_emit (Doppler + gravitational redshift)
+        // g = 1 / [u^t_emit (1 - Omega L/E)]
+        float g_freq = 1.0 / (ut_emit * (1.0 - Omega_k * L / E));
+        g_freq = max(g_freq, 0.01);
+
+        // Temperature profile: Novikov-Thorne-like T ~ r^{-3/4} f(r)
+        float temp = pow(r_isco / rc, 0.75) * pow(max(1.0 - sqrt(r_isco / rc), 0.01), 0.25);
+        temp = clamp(temp, 0.0, 1.0);
+
+        // Doppler-shifted temperature
+        float shifted_temp = clamp(temp * g_freq, 0.0, 1.0);
+        vec3 diskColor = blackBodyApprox(shifted_temp);
+
+        // Intensity: Doppler beaming ~ g^3 (optically thick bolometric)
+        float intensity = pow(g_freq, 3.0) * temp;
+
+        // Subtle azimuthal structure
+        intensity *= 0.7 + 0.3 * sin(phi_cur * 3.0 + rc * 2.0);
+
+        // Opacity gradient (more opaque near ISCO)
+        float opacity = 0.5 + 0.5 * smoothstep(r_diskOut, r_isco, rc);
+
+        color = diskColor * intensity * 2.5 * opacity;
+        color = min(color, vec3(5.0)); // prevent fireflies
+        hitSomething = true;
+        break;
+      }
+    }
+  }
+
+  if (!hitSomething) {
+    color = vec3(0.003, 0.003, 0.008);
+  }
+
+  // Reinhard tone mapping + gamma
+  color = color / (1.0 + color);
+  color = pow(color, vec3(1.0 / 2.2));
+
+  gl_FragColor = vec4(color, 1.0);
+}
+`;
+
+/* ---- WebGL setup ---- */
+function createShader(type, source) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, source);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    console.error('Shader compile error:', gl.getShaderInfoLog(s));
+    const lines = source.split('\n');
+    console.error(lines.map((l,i)=>(i+1)+': '+l).join('\n'));
+    gl.deleteShader(s);
+    return null;
+  }
+  return s;
+}
+
+const vs = createShader(gl.VERTEX_SHADER, vsSource);
+const fs = createShader(gl.FRAGMENT_SHADER, fsSource);
+const program = gl.createProgram();
+gl.attachShader(program, vs);
+gl.attachShader(program, fs);
+gl.linkProgram(program);
+if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+  console.error('Link error:', gl.getProgramInfoLog(program));
+  document.body.innerHTML = '<h1 style="color:red;padding:40px">Shader link failed</h1>';
+}
+gl.useProgram(program);
+
+const quad = new Float32Array([-1,-1, 1,-1, -1,1, 1,1]);
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(program, 'aPos');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+const uRes = gl.getUniformLocation(program, 'uResolution');
+const uSpinU = gl.getUniformLocation(program, 'uSpin');
+const uDist = gl.getUniformLocation(program, 'uCamDist');
+const uTheta = gl.getUniformLocation(program, 'uCamTheta');
+const uPhi = gl.getUniformLocation(program, 'uCamPhi');
+const uDisk = gl.getUniformLocation(program, 'uDiskOuter');
+const uSteps = gl.getUniformLocation(program, 'uMaxSteps');
+const uTimeU = gl.getUniformLocation(program, 'uTime');
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  canvas.width = Math.floor(canvas.clientWidth * dpr);
+  canvas.height = Math.floor(canvas.clientHeight * dpr);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* ---- render loop ---- */
+function render(t) {
+  gl.uniform2f(uRes, canvas.width, canvas.height);
+  gl.uniform1f(uSpinU, spin);
+  gl.uniform1f(uDist, camDist);
+  gl.uniform1f(uTheta, camTheta);
+  gl.uniform1f(uPhi, camPhi);
+  gl.uniform1f(uDisk, diskOuter);
+  gl.uniform1i(uSteps, maxSteps);
+  gl.uniform1f(uTimeU, t * 0.001);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  frameCount++;
+  const now = performance.now();
+  if (now - lastFpsTime > 1000) {
+    document.getElementById('fps-counter').textContent =
+      Math.round(frameCount * 1000 / (now - lastFpsTime)) + ' fps';
+    frameCount = 0;
+    lastFpsTime = now;
+  }
+  requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+</script>
+</body>
+</html>

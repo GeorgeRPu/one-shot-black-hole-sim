@@ -32,3 +32,7 @@ Requirements:
 - Keep it smooth (~60fps) in a browser; prioritize physical correctness.
 
 Return only the complete HTML file.
+
+## Repo Structure
+
+This repo is structured so that each model writes to a directory named after the model, and each directory contains 2 HTML files for the two simulators. Do NOT read or write any files outside of the model's directory.

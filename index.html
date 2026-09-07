@@ -4,27 +4,60 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#09090b" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#09090b">
 <title>Black Hole Sim Arena — LLM Comparison</title>
+<meta name="description" content="Compare how Claude Opus, Sonnet, and Fable render a real-time WebGL black hole from the same one-shot prompt. Side-by-side gravitational lensing, accretion disks, and ray tracing.">
+<link rel="canonical" href="https://georgepu.github.io/one-shot-black-hole-sim/">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='48' fill='%23000'/><circle cx='50' cy='50' r='48' fill='none' stroke='%23a78bfa' stroke-width='4'/><circle cx='50' cy='50' r='30' fill='none' stroke='%23ff7a3c' stroke-width='6' stroke-dasharray='12 8' opacity='.8'/></svg>">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Black Hole Sim Arena — LLM Comparison">
+<meta property="og:description" content="Compare how Claude Opus, Sonnet, and Fable render a real-time WebGL black hole from the same one-shot prompt.">
+<meta property="og:url" content="https://georgepu.github.io/one-shot-black-hole-sim/">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebApplication",
+  "name": "Black Hole Sim Arena",
+  "description": "Compare how different Claude models render a real-time WebGL black hole simulation from the same one-shot prompt.",
+  "url": "https://georgepu.github.io/one-shot-black-hole-sim/",
+  "applicationCategory": "Simulation",
+  "operatingSystem": "Any",
+  "author": {
+    "@type": "Person",
+    "name": "George Pu"
+  }
+}
+</script>
 <style>
   :root {
-    --bg: #05070d;
-    --panel: #0d121e;
-    --panel-2: #131a2a;
-    --border: rgba(255, 255, 255, 0.09);
-    --border-bright: rgba(120, 160, 255, 0.45);
-    --text: #dde4f0;
-    --text-dim: #8b95ab;
-    --accent: #7aa2ff;
-    --accent-soft: rgba(122, 162, 255, 0.14);
+    --bg: #09090b;
+    --surface: #111113;
+    --surface-2: #18181b;
+    --surface-3: #1e1e22;
+    --border: rgba(255, 255, 255, 0.06);
+    --border-hover: rgba(255, 255, 255, 0.12);
+    --border-active: rgba(255, 255, 255, 0.18);
+    --text: #fafafa;
+    --text-secondary: #a1a1aa;
+    --text-tertiary: #71717a;
+    --accent: #a78bfa;
+    --accent-dim: rgba(167, 139, 250, 0.12);
+    --accent-glow: rgba(167, 139, 250, 0.25);
+    --gradient-brand: linear-gradient(135deg, #a78bfa, #818cf8, #6366f1);
+    --radius: 12px;
+    --radius-sm: 8px;
+    --radius-xs: 6px;
     font-size: 15px;
   }
-  * { box-sizing: border-box; }
+  * { box-sizing: border-box; margin: 0; }
   html, body {
-    margin: 0;
     height: 100%;
     background: var(--bg);
     color: var(--text);
-    font: 400 1rem/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    font: 400 1rem/1.5 system-ui, -apple-system, "Segoe UI", "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
   body {
     display: flex;
@@ -32,54 +65,74 @@
     overflow: hidden;
   }
 
-  /* ---------- Header ---------- */
-  header {
+  /* ---------- Nav ---------- */
+  nav {
     flex: 0 0 auto;
     display: flex;
-    flex-wrap: wrap;
     align-items: center;
-    gap: 10px 18px;
-    padding: 10px 18px;
-    background: linear-gradient(180deg, #0a0f1a, #070b13);
+    gap: 16px;
+    padding: 0 24px;
+    height: 56px;
+    background: rgba(9, 9, 11, 0.8);
+    backdrop-filter: blur(16px) saturate(1.6);
+    -webkit-backdrop-filter: blur(16px) saturate(1.6);
     border-bottom: 1px solid var(--border);
+    z-index: 50;
   }
-  .brand {
+  .nav-brand {
     display: flex;
-    flex-direction: column;
-    gap: 2px;
-    margin-right: auto;
-    min-width: 0;
-    max-width: 58ch;
+    align-items: center;
+    gap: 10px;
+    margin-right: 8px;
   }
-  .brand h1 {
-    font-size: 1.05rem;
-    font-weight: 650;
+  .nav-logo {
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 50% 50%, #000 0 36%, transparent 37%),
+                conic-gradient(from 120deg, #ffb45e, #ff7a3c, #a78bfa, #6366f1, #ffb45e);
+    box-shadow: 0 0 18px rgba(167, 139, 250, 0.3);
+    flex-shrink: 0;
+  }
+  .nav-title {
+    font-size: 1rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    white-space: nowrap;
     margin: 0;
-    letter-spacing: 0.01em;
+    line-height: inherit;
+  }
+  .nav-divider {
+    width: 1px;
+    height: 20px;
+    background: var(--border);
+    flex-shrink: 0;
+  }
+  .nav-subtitle {
+    font-size: 0.82rem;
+    color: var(--text-tertiary);
     white-space: nowrap;
   }
-  .brand .sub {
-    font-size: 0.78rem;
-    line-height: 1.4;
-    color: var(--text-dim);
-  }
-  .brand .sub a { color: var(--text-dim); }
 
   .prompt-term {
     position: relative;
-    color: var(--text);
-    border-bottom: 1px dotted var(--text-dim);
+    color: var(--text-secondary);
+    border-bottom: 1px dotted var(--text-tertiary);
     cursor: help;
     outline: none;
+    transition: color 0.15s;
   }
-  .prompt-term:focus-visible { border-bottom-color: var(--accent); }
+  .prompt-term:hover, .prompt-term:focus-visible {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
   .prompt-pop {
     display: none;
     position: absolute;
     left: 0;
     top: 100%;
     z-index: 100;
-    padding-top: 8px; /* hover bridge between the word and the panel */
+    padding-top: 8px;
     width: min(600px, 86vw);
     cursor: auto;
   }
@@ -89,34 +142,43 @@
     display: block;
     max-height: 62vh;
     overflow-y: auto;
-    background: var(--panel-2);
-    border: 1px solid var(--border-bright);
-    border-radius: 10px;
-    padding: 12px 15px;
-    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.65);
-    color: var(--text);
-    font: 400 0.74rem/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--surface-2);
+    border: 1px solid var(--border-hover);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255,255,255,0.04);
+    color: var(--text-secondary);
+    font: 400 0.78rem/1.6 ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
     white-space: pre-wrap;
   }
 
-  .controls {
+  .nav-spacer { flex: 1; }
+
+  /* ---------- Toolbar ---------- */
+  .toolbar {
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
-    gap: 14px;
-    flex-wrap: nowrap;
+    gap: 10px;
+    padding: 10px 24px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
   }
-  @media (max-width: 640px) {
-    .controls { flex-wrap: wrap; }
-  }
-  @media (max-width: 900px) {
-    .brand .sub { display: none; }
+  .toolbar-label {
+    font-size: 0.78rem;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-right: 4px;
+    white-space: nowrap;
   }
 
   .seg {
     display: inline-flex;
-    background: var(--panel);
+    background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: 9px;
+    border-radius: var(--radius-sm);
     padding: 3px;
     gap: 2px;
   }
@@ -124,18 +186,58 @@
     appearance: none;
     border: 0;
     background: transparent;
-    color: var(--text-dim);
-    font: 600 0.82rem/1 inherit;
-    padding: 7px 13px;
-    border-radius: 6px;
+    color: var(--text-tertiary);
+    font: 500 0.8rem/1 inherit;
+    padding: 7px 14px;
+    border-radius: var(--radius-xs);
     cursor: pointer;
     white-space: nowrap;
-    transition: background 0.12s, color 0.12s;
+    transition: all 0.15s ease;
   }
-  .seg button:hover { color: var(--text); }
+  .seg button:hover { color: var(--text-secondary); }
   .seg button[aria-pressed="true"] {
-    background: var(--accent-soft);
-    color: var(--accent);
+    background: var(--surface-3);
+    color: var(--text);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+  }
+  .toolbar-spacer { flex: 1; }
+
+  .github-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-tertiary);
+    text-decoration: none;
+    font-size: 0.8rem;
+    font-weight: 500;
+    padding: 6px 12px;
+    border-radius: var(--radius-xs);
+    border: 1px solid var(--border);
+    transition: all 0.15s;
+  }
+  .github-link:hover {
+    color: var(--text-secondary);
+    border-color: var(--border-hover);
+    background: var(--surface-2);
+  }
+  .github-link svg {
+    width: 16px;
+    height: 16px;
+    fill: currentColor;
+  }
+
+  @media (max-width: 900px) {
+    .nav-subtitle, .nav-divider { display: none; }
+  }
+  @media (max-width: 640px) {
+    nav { padding: 0 14px; gap: 10px; }
+    .toolbar {
+      padding: 8px 14px;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .toolbar-label { display: none; }
+    .github-link span { display: none; }
   }
 
   /* ---------- Stage ---------- */
@@ -143,8 +245,8 @@
     flex: 1 1 auto;
     min-height: 0;
     display: grid;
-    gap: 8px;
-    padding: 8px;
+    gap: 6px;
+    padding: 6px;
   }
   main[data-layout="single"]  { grid-template-columns: 1fr; grid-template-rows: 1fr; }
   main[data-layout="duel"]    { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr; }
@@ -158,56 +260,86 @@
     }
   }
 
+  /* ---------- Pane ---------- */
   .pane {
     position: relative;
     display: flex;
     flex-direction: column;
     min-height: 0;
-    background: var(--panel);
+    background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 12px;
+    border-radius: var(--radius);
     overflow: hidden;
+    transition: border-color 0.2s;
   }
+  .pane:hover { border-color: var(--border-hover); }
+
   .pane-bar {
     flex: 0 0 auto;
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 10px;
-    background: var(--panel-2);
+    padding: 8px 12px;
+    background: var(--surface-2);
     border-bottom: 1px solid var(--border);
   }
+  .model-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: -0.01em;
+  }
+  .model-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .model-dot[data-model="opus4.6"] { background: #f97316; }
+  .model-dot[data-model="opus4.8"] { background: #a78bfa; }
+  .model-dot[data-model="sonnet5"] { background: #38bdf8; }
+  .model-dot[data-model="fable5"]  { background: #4ade80; }
+
   .pane-bar select {
     appearance: none;
-    background: var(--panel);
+    background: var(--surface);
     color: var(--text);
     border: 1px solid var(--border);
-    border-radius: 7px;
-    font: 600 0.82rem/1.2 inherit;
-    padding: 5px 26px 5px 10px;
+    border-radius: var(--radius-xs);
+    font: 600 0.8rem/1.2 inherit;
+    padding: 5px 28px 5px 10px;
     cursor: pointer;
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M1 1l4 4 4-4' stroke='%238b95ab' stroke-width='1.6' fill='none' stroke-linecap='round'/></svg>");
+    transition: border-color 0.15s;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M1 1l4 4 4-4' stroke='%2371717a' stroke-width='1.4' fill='none' stroke-linecap='round'/></svg>");
     background-repeat: no-repeat;
     background-position: right 9px center;
   }
-  .pane-bar select:hover { border-color: var(--border-bright); }
+  .pane-bar select:hover { border-color: var(--border-active); }
   .pane-bar .spacer { flex: 1; }
+
   .icon-btn {
     appearance: none;
-    border: 1px solid var(--border);
+    border: 1px solid transparent;
     background: transparent;
-    color: var(--text-dim);
-    border-radius: 7px;
-    width: 28px;
-    height: 28px;
+    color: var(--text-tertiary);
+    border-radius: var(--radius-xs);
+    width: 30px;
+    height: 30px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    font-size: 0.85rem;
-    transition: color 0.12s, border-color 0.12s;
+    font-size: 0.9rem;
+    transition: all 0.15s;
   }
-  .icon-btn:hover { color: var(--text); border-color: var(--border-bright); }
+  .icon-btn:hover {
+    color: var(--text-secondary);
+    background: var(--surface-3);
+    border-color: var(--border);
+  }
 
   .pane-body {
     position: relative;
@@ -225,6 +357,7 @@
     background: #000;
   }
 
+  /* ---------- Placeholder ---------- */
   .placeholder {
     position: absolute;
     inset: 0;
@@ -232,75 +365,198 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 12px;
+    gap: 16px;
     cursor: pointer;
-    background:
-      radial-gradient(ellipse 60% 45% at 50% 55%, rgba(122, 162, 255, 0.10), transparent 70%),
-      #01030a;
+    background: var(--bg);
     border: 0;
-    color: var(--text-dim);
+    color: var(--text-tertiary);
     font: inherit;
     width: 100%;
+    transition: color 0.2s;
   }
-  .placeholder:hover { color: var(--text); }
-  .placeholder .orb {
-    width: 66px;
-    height: 66px;
+  .placeholder:hover { color: var(--text-secondary); }
+  .placeholder:hover .orb { transform: scale(1.08); }
+  .placeholder:hover .play-ring { border-color: var(--accent); box-shadow: 0 0 30px var(--accent-glow); }
+
+  .orb-container {
+    position: relative;
+    width: 80px;
+    height: 80px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .orb {
+    width: 80px;
+    height: 80px;
     border-radius: 50%;
-    background: radial-gradient(circle at 50% 50%, #000 0 38%, transparent 39%),
-                conic-gradient(from 120deg, #ffb45e, #ff7a3c, #6b3bff, #ffb45e);
-    filter: blur(0.4px);
-    box-shadow: 0 0 34px rgba(255, 140, 70, 0.35);
+    background: radial-gradient(circle at 50% 50%, #000 0 36%, transparent 37%),
+                conic-gradient(from 120deg, #ffb45e, #ff7a3c, #a78bfa, #6366f1, #ffb45e);
+    box-shadow: 0 0 40px rgba(167, 139, 250, 0.25), 0 0 80px rgba(255, 122, 60, 0.12);
+    transition: transform 0.3s ease;
+    animation: orb-spin 12s linear infinite;
+  }
+  @keyframes orb-spin {
+    to { background: radial-gradient(circle at 50% 50%, #000 0 36%, transparent 37%),
+                     conic-gradient(from 480deg, #ffb45e, #ff7a3c, #a78bfa, #6366f1, #ffb45e); }
+  }
+  .play-ring {
+    position: absolute;
+    inset: -6px;
+    border-radius: 50%;
+    border: 2px solid var(--border-hover);
+    transition: all 0.3s ease;
   }
   .placeholder .cta {
     font-size: 0.88rem;
     font-weight: 600;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
-  .placeholder .meta { font-size: 0.76rem; }
+  .placeholder .cta-arrow {
+    display: inline-block;
+    transition: transform 0.2s;
+  }
+  .placeholder:hover .cta-arrow { transform: translateX(2px); }
+  .placeholder .meta {
+    font-size: 0.74rem;
+    color: var(--text-tertiary);
+  }
 
+  /* ---------- Footer ---------- */
   footer {
     flex: 0 0 auto;
-    padding: 6px 18px 9px;
-    font-size: 0.74rem;
-    color: var(--text-dim);
+    padding: 10px 24px;
+    font-size: 0.75rem;
+    color: var(--text-tertiary);
     border-top: 1px solid var(--border);
-    background: #070b13;
+    background: var(--surface);
     display: flex;
-    gap: 18px;
+    align-items: center;
+    gap: 20px;
     flex-wrap: wrap;
   }
-  footer b { color: var(--text); font-weight: 600; }
+  footer a {
+    color: var(--text-tertiary);
+    text-decoration: none;
+    transition: color 0.15s;
+  }
+  footer a:hover { color: var(--text-secondary); }
+  .footer-spacer { flex: 1; }
+  .footer-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-weight: 500;
+    color: var(--text-secondary);
+  }
+  .footer-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: #4ade80;
+    box-shadow: 0 0 6px rgba(74, 222, 128, 0.5);
+  }
+
+  @media (max-width: 640px) {
+    footer { padding: 8px 14px; gap: 12px; }
+    .footer-spacer { display: none; }
+  }
+
+  /* ---------- Skip link ---------- */
+  .skip-link {
+    position: absolute;
+    left: -9999px;
+    top: 4px;
+    z-index: 100;
+    background: var(--accent);
+    color: #000;
+    font-weight: 600;
+    font-size: 0.85rem;
+    padding: 8px 16px;
+    border-radius: var(--radius-xs);
+    text-decoration: none;
+  }
+  .skip-link:focus {
+    left: 8px;
+  }
+
+  /* ---------- Reduced motion ---------- */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+
+  /* ---------- Forced colours ---------- */
+  @media (forced-colors: active) {
+    .nav-logo, .orb, .model-dot, .footer-dot {
+      forced-color-adjust: none;
+    }
+    .pane { border: 1px solid ButtonText; }
+    .seg button[aria-pressed="true"] {
+      border: 2px solid Highlight;
+    }
+  }
 </style>
 </head>
 <body>
 
-<header>
-  <div class="brand">
-    <h1>Black Hole Sim Arena</h1>
-    <span class="sub">Different LLMs were each given the same
-      <span class="prompt-term" tabindex="0">prompt<span class="prompt-pop" role="tooltip"><span class="prompt-pop-inner" id="promptPop"></span></span></span>.
-      Compare the results.</span>
+<a class="skip-link" href="#stage">Skip to simulations</a>
+
+<nav>
+  <div class="nav-brand">
+    <div class="nav-logo"></div>
+    <h1 class="nav-title">Black Hole Sim Arena</h1>
+  </div>
+  <div class="nav-divider"></div>
+  <span class="nav-subtitle">
+    Each model was given the same
+    <span class="prompt-term" tabindex="0">one-shot prompt<span class="prompt-pop" role="tooltip"><span class="prompt-pop-inner" id="promptPop"></span></span></span>
+    — compare how they render a black hole.
+  </span>
+  <div class="nav-spacer"></div>
+  <a class="github-link" href="https://github.com/georgepu/one-shot-black-hole-sim" target="_blank" rel="noopener">
+    <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+    <span>Source</span>
+  </a>
+</nav>
+
+<div class="toolbar">
+  <span class="toolbar-label">Simulation</span>
+  <div class="seg" id="simSeg" role="group" aria-label="Simulation type">
+    <button data-sim="schwarzschild" aria-pressed="true">Schwarzschild</button>
+    <button data-sim="kerr" aria-pressed="false">Kerr (spinning)</button>
   </div>
 
-  <div class="controls">
-    <div class="seg" id="simSeg" role="group" aria-label="Simulation type">
-      <button data-sim="schwarzschild" aria-pressed="true">Schwarzschild</button>
-      <button data-sim="kerr" aria-pressed="false">Kerr (spinning)</button>
-    </div>
-
-    <div class="seg" id="layoutSeg" role="group" aria-label="Layout">
-      <button data-layout="single" aria-pressed="false">Single</button>
-      <button data-layout="duel" aria-pressed="true">Side by side</button>
-      <button data-layout="grid" aria-pressed="false">All four</button>
-    </div>
-
+  <span class="toolbar-label" style="margin-left: 8px;">Layout</span>
+  <div class="seg" id="layoutSeg" role="group" aria-label="Layout">
+    <button data-layout="single" aria-pressed="false">Single</button>
+    <button data-layout="duel" aria-pressed="true">Side by side</button>
+    <button data-layout="grid" aria-pressed="false">All four</button>
   </div>
-</header>
 
-<main id="stage" data-layout="duel"></main>
+  <div class="toolbar-spacer"></div>
+</div>
+
+<main id="stage" data-layout="duel">
+  <noscript>
+    <p style="color:#a1a1aa;text-align:center;padding:60px 24px;font-size:1rem;line-height:1.6">
+      This page compares real-time WebGL black hole simulations generated by four Claude models
+      (Opus 4.6, Opus 4.8, Sonnet 5, Fable 5) from the same one-shot prompt.<br>
+      JavaScript is required to load and run the simulations.
+    </p>
+  </noscript>
+</main>
 
 <footer>
-  <span>Sims load on click to spare your GPU — each pane runs its own real-time ray tracer.</span>
+  <span class="footer-badge"><span class="footer-dot"></span> WebGL</span>
+  <span>Each pane runs its own real-time ray tracer — click to load</span>
+  <div class="footer-spacer"></div>
 </footer>
 
 <script>
@@ -314,7 +570,6 @@ const MODELS = [
 ];
 const SIM_NAMES = { schwarzschild: "Schwarzschild", kerr: "Kerr" };
 
-// raw markdown, verbatim from prompts.md
 const PROMPTS = {
   schwarzschild: `## Schwarzschild Black Hole Simulator
 
@@ -356,13 +611,10 @@ const PANE_COUNT = { single: 1, duel: 2, grid: 4 };
 const state = {
   sim: "schwarzschild",
   layout: "duel",
-  // model chosen per pane slot; defaults cover all four models
   slots: MODELS.map(m => m.id),
-  // panes the user has activated (index -> bool); grid auto-activates
   loaded: [false, false, false, false],
 };
 
-// restore from URL hash if present, e.g. #kerr/grid or #kerr/duel/opus4.8,fable5
 (function restore() {
   const parts = location.hash.replace(/^#/, "").split("/").filter(Boolean);
   if (SIM_NAMES[parts[0]]) state.sim = parts[0];
@@ -393,8 +645,16 @@ function buildPane(i) {
   const bar = document.createElement("div");
   bar.className = "pane-bar";
 
+  const badge = document.createElement("span");
+  badge.className = "model-badge";
+  const dot = document.createElement("span");
+  dot.className = "model-dot";
+  dot.dataset.model = state.slots[i];
+  const badgeLabel = document.createTextNode(MODELS.find(m => m.id === state.slots[i])?.label || "");
+  badge.append(dot, badgeLabel);
+
   const select = document.createElement("select");
-  select.title = "Choose model";
+  select.setAttribute("aria-label", "Choose model for pane " + (i + 1));
   for (const m of MODELS) {
     const opt = document.createElement("option");
     opt.value = m.id;
@@ -405,12 +665,12 @@ function buildPane(i) {
   select.addEventListener("change", () => {
     state.slots[i] = select.value;
     syncHash();
-    render(); // reload this pane with the new model
+    render();
   });
 
   const reload = document.createElement("button");
   reload.className = "icon-btn";
-  reload.title = "Restart simulation";
+  reload.setAttribute("aria-label", "Restart simulation");
   reload.textContent = "↻";
   reload.addEventListener("click", () => {
     const frame = pane.querySelector("iframe");
@@ -419,7 +679,7 @@ function buildPane(i) {
 
   const fs = document.createElement("button");
   fs.className = "icon-btn";
-  fs.title = "Fullscreen this pane";
+  fs.setAttribute("aria-label", "Fullscreen this pane");
   fs.textContent = "⛶";
   fs.addEventListener("click", () => {
     const body = pane.querySelector(".pane-body");
@@ -445,8 +705,11 @@ function buildPane(i) {
     const ph = document.createElement("button");
     ph.className = "placeholder";
     ph.innerHTML = `
-      <div class="orb"></div>
-      <div class="cta">▶ Load simulation</div>
+      <div class="orb-container">
+        <div class="play-ring"></div>
+        <div class="orb"></div>
+      </div>
+      <div class="cta">Load simulation <span class="cta-arrow">&rarr;</span></div>
       <div class="meta">real-time WebGL ray tracer</div>`;
     ph.addEventListener("click", () => {
       state.loaded[i] = true;
@@ -483,7 +746,6 @@ document.getElementById("simSeg").addEventListener("click", (e) => {
   const b = e.target.closest("button[data-sim]");
   if (!b || b.dataset.sim === state.sim) return;
   state.sim = b.dataset.sim;
-  // keep loaded state: already-active panes swap straight to the new sim
   syncHash();
   render();
 });
@@ -492,7 +754,6 @@ document.getElementById("layoutSeg").addEventListener("click", (e) => {
   const b = e.target.closest("button[data-layout]");
   if (!b || b.dataset.layout === state.layout) return;
   state.layout = b.dataset.layout;
-  // in single view, drop the extra panes' running sims
   const n = PANE_COUNT[state.layout];
   for (let i = n; i < 4; i++) state.loaded[i] = false;
   syncHash();

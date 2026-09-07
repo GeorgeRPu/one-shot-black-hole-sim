@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://georgepu.github.io/one-shot-black-hole-sim/sitemap.xml
